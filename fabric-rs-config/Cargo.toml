@@ -1,0 +1,20 @@
+[package]
+name = "fabric-rs-config"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/lib.rs"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+kube = { version = "0.87.1", features = ["runtime", "derive", "unstable-runtime"] }
+k8s-openapi = { version = "0.20.0", features = ["latest","schemars"] }
+anyhow = "1.0.79"
+log = "0.4.20"
+tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
+futures = "0.3.28"
+kube_virt_rs = { path = "../../kube-virt-rs" }
+clap = { version = "4.1", features = ["derive"] }
+serde = { version = "1.0.195", features = ["derive", "serde_derive"] }

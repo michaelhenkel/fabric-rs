@@ -1,0 +1,3 @@
+[workspace]
+members = ["xtask", "fabric-rs", "fabric-rs-common", "fabric-rs-config", "fabric-rs-userspace","disco-rs"]
+resolver = "2"

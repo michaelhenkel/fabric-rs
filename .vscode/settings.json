@@ -1,0 +1,16 @@
+{
+  "rust-analyzer.linkedProjects": [
+    "Cargo.toml",
+    "fabric-rs-ebpf/Cargo.toml",
+    "disco-rs/Cargo.toml",
+    "./fabric-rs-userspace/Cargo.toml"
+  ],
+  "rust-analyzer.server.extraEnv": {
+    "RUSTFLAGS": "--cfg s2n_quic_unstable"
+  },
+  "rust-analyzer.cargo.cfgs": {
+    "rustflags": "--cfg s2n_quic_unstable"
+  },
+  "rust-analyzer.cargo.target": "x86_64-unknown-linux-gnu",
+  "rust-analyzer.checkOnSave.allTargets": false,
+}

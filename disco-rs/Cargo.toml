@@ -1,0 +1,15 @@
+[package]
+name = "disco-rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+log = "0.4.20"
+pnet_base = { version = "0.34.0", features = ["serde"] }
+pnet_macros = { version = "0.34.0" }
+pnet_macros_support = "0.34.0"

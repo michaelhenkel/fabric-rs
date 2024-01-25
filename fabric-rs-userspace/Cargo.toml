@@ -1,0 +1,25 @@
+[package]
+name = "fabric-rs-userspace"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+anyhow = "1.0.79"
+libc = "0.2"
+aya = { git = "https://github.com/aya-rs/aya", features = ["async_tokio"] }
+tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
+futures = "0.3.28"
+log = "0.4.20"
+network-types = { version = "0.0.5", features = ["serde"] }
+pnet = { version = "0.34.0", features = ["serde"] }
+rtnetlink = "0.14.0"
+netlink-packet-route = { version = "0.18.1", features = ["rich_nlas"] }
+disco-rs = { path = "../disco-rs" }
+fabric-rs-common = { path = "../fabric-rs-common" }
+pnet_macros = "0.34.0"
+inquire = "0.6.2"

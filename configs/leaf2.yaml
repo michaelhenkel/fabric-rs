@@ -1,0 +1,5 @@
+id: 3
+interfaces:
+- enp6s0
+- enp7s0
+- enp8s0

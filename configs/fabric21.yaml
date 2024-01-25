@@ -1,0 +1,4 @@
+id: 10
+interfaces:
+- leaf2-enp6s0
+- spine1-enp7s0

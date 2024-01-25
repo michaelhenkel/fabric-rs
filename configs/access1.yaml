@@ -1,0 +1,4 @@
+id: 6
+interfaces:
+- host1-enp6s0
+- leaf1-enp8s0

@@ -1,0 +1,28 @@
+[package]
+name = "fabric-rs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+aya = { git = "https://github.com/aya-rs/aya", features = ["async_tokio"] }
+aya-log = { git = "https://github.com/aya-rs/aya" }
+clap = { version = "4.4.17", features = ["derive"] }
+fabric-rs-common = { path = "../fabric-rs-common", features = ["user"] }
+fabric-rs-config = { path = "../fabric-rs-config" }
+fabric-rs-userspace = { path = "../fabric-rs-userspace" }
+kube_virt_rs = { path = "../../kube-virt-rs" }
+anyhow = "1"
+env_logger = "0.10"
+libc = "0.2"
+log = "0.4"
+tokio = { version = "1.25", features = ["macros", "rt", "rt-multi-thread", "net", "signal"] }
+futures = "0.3.28"
+inquire = "0.6.2"
+serde_yaml = "0.9.30"
+serde = { version = "1.0.195", features = ["derive", "serde_derive"] }
+simplelog = "0.12.1"
+
+[[bin]]
+name = "fabric-rs"
+path = "src/main.rs"
