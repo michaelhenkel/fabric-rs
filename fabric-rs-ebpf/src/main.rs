@@ -77,12 +77,52 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
         }
     }
 
-    if unsafe { (*eth_hdr).ether_type } != EtherType::Ipv4 {
-        return Ok(xdp_action::XDP_PASS);
+
+
+    if unsafe { (*eth_hdr).ether_type } == EtherType::Arp {
+        info!(&ctx, "arp packet received");
+
+        if let Some(fd) = unsafe { XSKMAP.get(queue_idx)}{
+            info!(&ctx, "xsk_map.get returned fd: {}", fd);
+        } else {
+            info!(&ctx, "xsk_map.get returned None");
+        }
+
+        match unsafe{ XSKMAP.redirect(queue_idx, 0) }{
+            Ok(res) => {
+                info!(&ctx, "bpf_redirect returned: {}", res);
+                return Ok(res)
+            },
+            Err(e) => {
+                info!(&ctx, "bpf_redirect returned error: {}", e);
+                return Ok(xdp_action::XDP_PASS);
+            }
+        }
     }
 
     let ipv4_hdr = ptr_at::<Ipv4Hdr>(&ctx, EthHdr::LEN)
         .ok_or(xdp_action::XDP_ABORTED)?;
+
+    if unsafe { (*ipv4_hdr).proto } == IpProto::Icmp {
+        info!(&ctx, "icmp packet received");
+
+        if let Some(fd) = unsafe { XSKMAP.get(queue_idx)}{
+            info!(&ctx, "xsk_map.get returned fd: {}", fd);
+        } else {
+            info!(&ctx, "xsk_map.get returned None");
+        }
+
+        match unsafe{ XSKMAP.redirect(queue_idx, 0) }{
+            Ok(res) => {
+                info!(&ctx, "bpf_redirect returned: {}", res);
+                return Ok(res)
+            },
+            Err(e) => {
+                info!(&ctx, "bpf_redirect returned error: {}", e);
+                return Ok(xdp_action::XDP_PASS);
+            }
+        }
+    }
 
     let dst_ip = unsafe { (*ipv4_hdr).dst_addr };
     let src_ip = unsafe { (*ipv4_hdr).src_addr };

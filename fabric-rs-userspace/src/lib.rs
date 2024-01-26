@@ -1,4 +1,5 @@
 use std::{collections::HashMap, sync::{Arc, Mutex}};
+use af_xdp::af_xdp::AfXdpClient;
 use aya::maps::{LpmTrie, MapData, XskMap};
 use disco_rs::{DiscoHdr, DiscoHdrPacket, MutableDiscoHdrPacket};
 use fabric_rs_common::RouteNextHop;
@@ -50,6 +51,7 @@ impl UserSpace{
         self.state_client = Some(state_client.clone());
 
         let mut af_xdp = AfXdp::new(self.interfaces.clone(), xsk_map);
+        let af_xdp_client = af_xdp.client();
 
         let mut jh_list = Vec::new();
 
@@ -61,25 +63,23 @@ impl UserSpace{
         jh_list.extend(jh.await?);
         info!("{} state tasks running", jh_list.len());
 
-        let jh = tokio::spawn(async move{
-            let _ = af_xdp.run().await;
-        });
-
-        jh_list.push(jh);
-        /*
-        let jh = af_xdp.run();
+        
+        let jh = af_xdp.run(recv_tx);
         jh_list.extend(jh.await?);
         info!("{} af_xdp tasks running", jh_list.len());
-        */
+        
 
-        /*
-        let jh = self.receiver(recv_rx);
+        
+        let jh = self.receiver(recv_rx, af_xdp_client.clone());
         jh_list.push(jh.await?);
         info!("{} receiver tasks running", jh_list.len());
-        */
-        let jh = self.disco_sender(sr_client);
+    
+
+        
+        let jh = self.disco_sender(sr_client, af_xdp_client);
         jh_list.push(jh.await?);
         info!("{} disco sender tasks running", jh_list.len());
+        
 
         /*
         let cli = Cli::new();
@@ -95,12 +95,7 @@ impl UserSpace{
         Ok(())
     }
 
-    pub async fn receiver(&self, mut rx: tokio::sync::mpsc::Receiver<(u32, Vec<u8>)>) -> anyhow::Result<tokio::task::JoinHandle<()>>{
-        let sr_client = if let Some(sr_client) = &self.sr_client{
-            sr_client.clone()
-        } else {
-            return Err(anyhow::anyhow!("sr_client not found"));
-        };
+    pub async fn receiver(&self, mut rx: tokio::sync::mpsc::Receiver<(u32, Vec<u8>)>, af_xdp_client: AfXdpClient) -> anyhow::Result<tokio::task::JoinHandle<()>>{
         let state_client = if let Some(state_client) = &self.state_client{
             state_client.clone()
         } else {
@@ -110,6 +105,7 @@ impl UserSpace{
         let jh = tokio::spawn(async move{
             loop{
                 while let Some((ifidx, msg)) = rx.recv().await{
+                    info!("receiver received msg: {}",msg.len());
                     let eth_packet = if let Some(eth_packet) = EthernetPacket::new(msg.as_slice()){
                         eth_packet
                     } else {
@@ -122,9 +118,9 @@ impl UserSpace{
                             } else {
                                 continue;
                             };
-                            if let Err(e) = arp_handler(arp_packet, ifidx, state_client.clone(), sr_client.clone()).await{
-                                error!("Error handling arp: {:?}", e);
-                            }
+                            //if let Err(e) = arp_handler(arp_packet, ifidx, state_client.clone(), sr_client.clone()).await{
+                            //    error!("Error handling arp: {:?}", e);
+                            //}
                         },
                         EtherType(0x0060) => {
                             let disco_packet = if let Some(disco_packet) = DiscoHdrPacket::new(eth_packet.payload()){
@@ -137,9 +133,9 @@ impl UserSpace{
                             } else {
                                 continue;
                             };
-                            if let Err(e) = disco_handler(disco_packet, interface, state_client.clone(), sr_client.clone()).await{
-                                error!("Error handling disco: {:?}", e);
-                            }
+                            //if let Err(e) = disco_handler(disco_packet, interface, state_client.clone(), sr_client.clone()).await{
+                            //    error!("Error handling disco: {:?}", e);
+                            //}
                         },
                         _ => {
                             continue;
@@ -152,7 +148,7 @@ impl UserSpace{
         Ok(jh)
     }
 
-    pub async fn disco_sender(&self, sr_client: SendReceiveClient) -> anyhow::Result<tokio::task::JoinHandle<()>>{
+    pub async fn disco_sender(&self, sr_client: SendReceiveClient, mut afxdp_client: AfXdpClient) -> anyhow::Result<tokio::task::JoinHandle<()>>{
         info!("Starting Disco Sender");
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         let interfaces = self.interfaces.clone();
@@ -175,7 +171,7 @@ impl UserSpace{
                     disco_packet.set_ip(u32::from_be_bytes(interface.ip.octets()));
                     disco_packet.set_op(0);
                     ethernet_packet.set_payload(disco_packet.packet());
-                    if let Err(e) = sr_client.send(interface.ifidx, ethernet_packet.packet().to_vec()).await{
+                    if let Err(e) = afxdp_client.send(interface.ifidx, ethernet_packet.packet().to_vec()).await{
                         println!("Error sending disco: {:?}", e);
                     }
                     info!("Sent disco");
