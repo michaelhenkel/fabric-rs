@@ -1,6 +1,6 @@
 use std::{fmt::{Display, Formatter}, net::Ipv4Addr, sync::{Arc, Mutex}};
 use aya::maps::{LpmTrie, MapData};
-use log::error;
+use log::{error, info};
 use fabric_rs_common::RouteNextHop as RNH;
 use pnet::util::MacAddr;
 use tokio::sync::RwLock;
@@ -32,6 +32,7 @@ impl State{
         self.client.clone()
     }
     pub async fn run(&self) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>>{
+        info!("Starting State");
         let lt = self.lpm_trie.clone();
         let command_channel = self.rx.clone();
         let mut jh_list = Vec::new();
@@ -44,6 +45,7 @@ impl State{
                 while let Some(cmd) = command_channel.recv().await{
                     match cmd{
                         StateCommand::List { tx , table_type} => {
+                            info!("state command list table_type: {}", table_type);
                             match table_type{
                                 TableType::ForwardingTable => {
                                     let ft_list = ft.list();
@@ -84,6 +86,7 @@ impl State{
                             }
                         },
                         StateCommand::Del { key } => {
+                            info!("state command del");
                             match key{
                                 Key::NEIGHBOR(key) => {
                                     nt.remove(key.into());
@@ -97,6 +100,7 @@ impl State{
                             }
                         }
                         StateCommand::Add(key_value) => {
+                            info!("state command add key_value: {}", key_value);
                             match key_value{
                                 KeyValue::NEIGHBOR{key, value} => {
                                     nt.add(key.into(), value.into());
@@ -110,6 +114,7 @@ impl State{
                             }
                         },
                         StateCommand::Get{key, tx} => {
+                            info!("state command get");
                             match key{
                                 Key::NEIGHBOR(key) => {
                                     let value = nt.get(key.into());

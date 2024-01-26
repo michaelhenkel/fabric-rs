@@ -11,7 +11,7 @@ use aya_bpf::{
     bindings::xdp_action,
     macros::{xdp,map},
     programs::{XdpContext, xdp},
-    maps::{HashMap, lpm_trie::{LpmTrie, Key}}, helpers::bpf_redirect,
+    maps::{HashMap, lpm_trie::{LpmTrie, Key}, XskMap}, helpers::bpf_redirect,
 };
 use aya_log_ebpf::{info, warn};
 use fabric_rs_common::{InterfaceConfig, RouteNextHop};
@@ -28,6 +28,10 @@ static mut FORWARDINGTABLE: HashMap<u32, RouteNextHop> =
 static mut ROUTINGTABLE: LpmTrie<u32, [RouteNextHop;32]> =
     LpmTrie::<u32, [RouteNextHop;32]>::with_max_entries(2048, 0);
 
+#[map(name = "XSKMAP")]
+static mut XSKMAP: XskMap = XskMap::with_max_entries(8, 0);
+
+
 pub enum InstanceType {
     INSTANCE,
     NETWORK,
@@ -43,11 +47,34 @@ pub fn fabric_rs(ctx: XdpContext) -> u32 {
 
 fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
     
+    let ingress_if_idx = unsafe { (*ctx.ctx).ingress_ifindex };
+    let queue_idx = unsafe { (*ctx.ctx).rx_queue_index };
+    info!(
+        &ctx,
+        "ingress_if_idx: {}, queue_idx: {}", ingress_if_idx, queue_idx
+    );
 
     let eth_hdr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_ABORTED)?;
     
     if unsafe { (*eth_hdr).ether_type } == EtherType::Loop {
-        return Ok(xdp_action::XDP_PASS);
+        info!(&ctx, "disco packet received");
+
+        if let Some(fd) = unsafe { XSKMAP.get(queue_idx)}{
+            info!(&ctx, "xsk_map.get returned fd: {}", fd);
+        } else {
+            info!(&ctx, "xsk_map.get returned None");
+        }
+
+        match unsafe{ XSKMAP.redirect(queue_idx, 0) }{
+            Ok(res) => {
+                info!(&ctx, "bpf_redirect returned: {}", res);
+                return Ok(res)
+            },
+            Err(e) => {
+                info!(&ctx, "bpf_redirect returned error: {}", e);
+                return Ok(xdp_action::XDP_PASS);
+            }
+        }
     }
 
     if unsafe { (*eth_hdr).ether_type } != EtherType::Ipv4 {

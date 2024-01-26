@@ -1,9 +1,9 @@
-use std::{process::exit, sync::{Arc, Mutex}};
-use inquire::{error::CustomUserError, length, required, ui::RenderConfig, Text};
-use log::error;
+use std::{process::exit, sync::Arc};
+use inquire::{error::CustomUserError, required, Text};
+use log::{error, info};
 use tokio::{sync::RwLock, task::JoinHandle};
 
-use crate::state::{state::{KeyValue, StateClient}, table::{self, neighbor_table::neighbor_table::NeighborTable, table::TableType}};
+use crate::state::{state::{KeyValue, StateClient}, table::table::TableType};
 
 pub struct Cli{
     client: CliClient,
@@ -28,7 +28,10 @@ impl Cli{
         }
     }
     pub async fn run(&self, state_client: StateClient) -> anyhow::Result<Vec<JoinHandle<()>>>{
+        info!("Starting Cli");
         let mut jh_list = Vec::new();
+        
+        /*
         let rx = self.rx.clone();
         let jh = tokio::spawn(async move{
             let mut rx = rx.write().await;
@@ -36,6 +39,7 @@ impl Cli{
                 while let Some(cmd) = rx.recv().await{
                     match cmd{
                         CliCommand::List{table_type, tx} => {
+                            info!("cli command list table_type: {}", table_type);
                             let nt = match state_client.list(table_type).await{
                                 Ok(nt) => nt,
                                 Err(e) => {
@@ -85,6 +89,10 @@ impl Cli{
                 
             }
         });
+        */
+        let jh = tokio::spawn(async move{loop{}});
+        jh_list.push(jh);
+        let jh = tokio::spawn(async move{loop{}});
         jh_list.push(jh);
 
         Ok(jh_list)

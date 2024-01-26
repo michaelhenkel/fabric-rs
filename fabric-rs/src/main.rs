@@ -7,7 +7,7 @@ use std::{vec, future};
 
 use anyhow::Context;
 use aya::maps::lpm_trie::Key;
-use aya::maps::{LpmTrie, MapData};
+use aya::maps::{LpmTrie, MapData, XskMap};
 use aya::programs::{Xdp, XdpFlags};
 use aya::{include_bytes_aligned, Bpf};
 use aya_log::BpfLogger;
@@ -112,6 +112,13 @@ async fn main() -> Result<(), anyhow::Error> {
         panic!("ROUTINGTABLE map not found");
     };
 
+    let xsk_map = if let Some(xsk_map) = bpf.take_map("XSKMAP"){
+        let xsk_map: XskMap<MapData> = XskMap::try_from(xsk_map).unwrap();
+        xsk_map
+    } else {
+        panic!("XSKMAP map not found");
+    };
+
     let mut jh_list = Vec::new();
     let mut user_space = UserSpace::new(
         interface_list,
@@ -122,7 +129,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 
     let jh: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
-        user_space.run().await
+        user_space.run(xsk_map).await
     });
     jh_list.push(jh);
     

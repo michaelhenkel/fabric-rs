@@ -1,21 +1,18 @@
-use std::collections::HashMap;
-use log::{error, info};
+use std::{collections::HashMap, sync::Arc};
+use log::{error, info, warn};
+use tokio::sync::RwLock;
 use crate::interface::interface::Interface;
 
 #[derive(Clone)]
 pub struct SendReceiveClient{
-    sender_channel: Option<tokio::sync::mpsc::Sender<(u32, Vec<u8>)>>,
+    sender_channel: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
 }
 
 impl SendReceiveClient{
     pub async fn send(&self, ifidx: u32, msg: Vec<u8>) -> anyhow::Result<()>{
-        if let Some(sender_channel) = &self.sender_channel{
-            sender_channel.send((ifidx,msg)).await?;
-        }
+        info!("sending message on interface: {}", ifidx);
+        self.sender_channel.send((ifidx,msg)).await?;
         Ok(())
-    }
-    pub fn set_sender_channel(&mut self, sender_channel: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>){
-        self.sender_channel = Some(sender_channel);
     }
 }
 
@@ -23,6 +20,7 @@ pub struct SendReceive{
     interfaces: HashMap<u32, Interface>,
     client: SendReceiveClient,
     tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>,
+    recv_rx: Arc<RwLock<tokio::sync::mpsc::Receiver<(u32, Vec<u8>)>>>
 }
 
 impl SendReceive{
@@ -32,21 +30,22 @@ impl SendReceive{
     }
 
     pub fn new(interfaces: HashMap<u32, Interface>, tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>) -> SendReceive{
+        let (recv_tx, recv_rx) = tokio::sync::mpsc::channel(100);
         SendReceive{
             interfaces,
             client: SendReceiveClient{
-                sender_channel: None,
+                sender_channel: recv_tx,
             },
             tx,
+            recv_rx: Arc::new(RwLock::new(recv_rx)),
         }
     }
 
     pub async fn run(&mut self) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>>{
+        info!("Starting SendReceive");
         let (send_tx, send_rx) = tokio::sync::mpsc::channel(100);
-        let (recv_tx, recv_rx) = tokio::sync::mpsc::channel(100);
-        self.client.set_sender_channel(recv_tx.clone());
         let mut jh_list = Vec::new();
-        let jh = self.send_recv(send_tx, recv_rx);
+        let jh = self.send_recv(send_tx, self.recv_rx.clone());
         jh_list.extend(jh.await?);
         let jh = self.recv(send_rx);
         jh_list.push(jh.await?);
@@ -61,12 +60,13 @@ impl SendReceive{
                     if let Err(e) = tx.send(msg.clone()).await{
                         error!("Error sending value: {:?}", e);
                     }
+                    info!("message sent");
                 }
             }
         });
         Ok(jh)
     }
-    async fn send_recv(&mut self, tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>, mut rx: tokio::sync::mpsc::Receiver<(u32, Vec<u8>)>) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>>{
+    async fn send_recv(&mut self, tx: tokio::sync::mpsc::Sender<(u32, Vec<u8>)>, rx: Arc<RwLock<tokio::sync::mpsc::Receiver<(u32, Vec<u8>)>>>) -> anyhow::Result<Vec<tokio::task::JoinHandle<()>>>{
         let mut jh_list = Vec::new();
         let all_interfaces = pnet::datalink::interfaces();
         let mut sender_list = HashMap::new();
@@ -90,13 +90,15 @@ impl SendReceive{
             let jh = tokio::spawn(async move{
                 loop{
                     let buf = dl_rx.next().unwrap();
+                    info!("received message on interface: {}", ifidx);
                     tx.send((ifidx, buf.to_vec())).await.unwrap();
                 }
             });
             jh_list.push(jh);
         }
-        
+
         let jh = tokio::spawn(async move{
+            let mut rx = rx.write().await;
             loop{
                 while let Some((ifidx, msg)) = rx.recv().await{
                     if let Some(tx) = sender_list.get_mut(&ifidx){

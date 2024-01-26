@@ -1,20 +1,22 @@
 use std::{collections::HashMap, sync::{Arc, Mutex}};
-use aya::maps::{LpmTrie, MapData};
+use aya::maps::{LpmTrie, MapData, XskMap};
 use disco_rs::{DiscoHdr, DiscoHdrPacket, MutableDiscoHdrPacket};
 use fabric_rs_common::RouteNextHop;
 use interface::interface::Interface;
-use log::error;
+use log::{error, info};
 use network_types::eth::EthHdr;
 use pnet::{packet::{arp::ArpPacket, ethernet::{EtherType, EtherTypes, EthernetPacket, MutableEthernetPacket}}, util::MacAddr};
 use send_receive::send_receive::{SendReceive, SendReceiveClient};
 use state::{state::{Key, KeyValue, State, StateClient}, table::neighbor_table::neighbor_table::{Neighbor, NeighborInterface}};
 use cli::cli::Cli;
 use pnet::packet::Packet;
+use crate::af_xdp::af_xdp::AfXdp;
 
 pub mod interface;
 pub mod send_receive;
 pub mod state;
 pub mod cli;
+pub mod af_xdp;
 
 pub struct UserSpace{
     lpm_trie: Arc<Mutex<LpmTrie<MapData, u32, [RouteNextHop;32]>>>,
@@ -38,7 +40,7 @@ impl UserSpace{
             state_client: None,
         }
     }
-    pub async fn run(&mut self) -> anyhow::Result<()>{
+    pub async fn run(&mut self, xsk_map: XskMap<MapData>) -> anyhow::Result<()>{
         let (recv_tx, recv_rx) = tokio::sync::mpsc::channel(100);
         let mut sr = SendReceive::new(self.interfaces.clone(), recv_tx.clone());
         let sr_client = sr.client();
@@ -47,24 +49,46 @@ impl UserSpace{
         let state_client = state.client();
         self.state_client = Some(state_client.clone());
 
+        let mut af_xdp = AfXdp::new(self.interfaces.clone(), xsk_map);
+
         let mut jh_list = Vec::new();
 
         let jh = sr.run();
         jh_list.extend(jh.await?);
+        info!("{} send receive tasks running", jh_list.len());
 
         let jh = state.run();
         jh_list.extend(jh.await?);
+        info!("{} state tasks running", jh_list.len());
 
+        let jh = tokio::spawn(async move{
+            let _ = af_xdp.run().await;
+        });
+
+        jh_list.push(jh);
+        /*
+        let jh = af_xdp.run();
+        jh_list.extend(jh.await?);
+        info!("{} af_xdp tasks running", jh_list.len());
+        */
+
+        /*
         let jh = self.receiver(recv_rx);
         jh_list.push(jh.await?);
-
+        info!("{} receiver tasks running", jh_list.len());
+        */
         let jh = self.disco_sender(sr_client);
         jh_list.push(jh.await?);
+        info!("{} disco sender tasks running", jh_list.len());
 
+        /*
         let cli = Cli::new();
-
         let jh = cli.run(state_client);
         jh_list.extend(jh.await?);
+        info!("{} cli tasks running", jh_list.len());
+        */
+
+        info!("running {} tasks", jh_list.len());
 
         futures::future::join_all(jh_list).await;
 
@@ -129,12 +153,16 @@ impl UserSpace{
     }
 
     pub async fn disco_sender(&self, sr_client: SendReceiveClient) -> anyhow::Result<tokio::task::JoinHandle<()>>{
+        info!("Starting Disco Sender");
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
         let interfaces = self.interfaces.clone();
         let id = self.id.clone();
+        info!("Disco Sender id {}",id);
         let jh = tokio::spawn(async move{
+            info!("Starting Disco Sender Interval");
             loop{
                 interval.tick().await;
+                info!("disco sender interval ticked");
                 for (_, interface) in interfaces.iter(){
                     let mut ethernet_buffer = [0u8; EthHdr::LEN + 24];
                     let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
@@ -150,6 +178,7 @@ impl UserSpace{
                     if let Err(e) = sr_client.send(interface.ifidx, ethernet_packet.packet().to_vec()).await{
                         println!("Error sending disco: {:?}", e);
                     }
+                    info!("Sent disco");
                 }
             }
         });

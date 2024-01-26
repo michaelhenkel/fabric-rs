@@ -23,3 +23,4 @@ disco-rs = { path = "../disco-rs" }
 fabric-rs-common = { path = "../fabric-rs-common" }
 pnet_macros = "0.34.0"
 inquire = "0.6.2"
+xdpilone = "1.0.1"
