@@ -1,13 +1,14 @@
 use std::{mem, fmt::{self, Display}};
 use pnet_macros::Packet;
 use log::info;
-use pnet_macros_support::{types::u32be, packet::Packet};
+use pnet_macros_support::{types::{u16be, u32be}, packet::Packet};
 use pnet_base::MacAddr;
 
 #[derive(Clone, Packet)]
 pub struct DiscoHdr{
     pub id: u32be,
     pub ip: u32be,
+    pub len: u16be,
     #[construct_with(u8, u8, u8, u8, u8, u8)]
     pub mac: MacAddr,
     pub op: u8,
@@ -16,7 +17,7 @@ pub struct DiscoHdr{
 }
 
 impl DiscoHdr {
-    pub const LEN: usize = 13;
+    pub const LEN: usize = 17;
 }
 
 impl DiscoHdrPacket<'_>{

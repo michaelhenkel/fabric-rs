@@ -1,10 +1,12 @@
 use core::{mem::MaybeUninit, num::NonZeroU32, ptr::NonNull};
 use std::{collections::HashMap, error::Error, sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex}, time::Duration};
 use anyhow::anyhow;
-use pnet::packet::ethernet::EthernetPacket;
+use disco_rs::DiscoHdrPacket;
+use fabric_rs_common::InterfaceQueue;
+use pnet::packet::{ethernet::EthernetPacket, Packet};
 use tokio::sync::RwLock;
 use xdpilone::{xdp::XdpDesc, DeviceQueue, RingRx, RingTx};
-use aya::maps::{MapData, XskMap};
+use aya::maps::{MapData, XskMap, HashMap as BpfHashMap};
 use xdpilone::{BufIdx, IfInfo, Socket, SocketConfig, Umem, UmemConfig};
 use log::info;
 use crate::interface::interface::Interface;
@@ -27,27 +29,26 @@ impl AfXdpClient{
         }
     }
     pub async fn send(&mut self, ifidx: u32, buf: Vec<u8>) -> anyhow::Result<()>{
-        info!("Sending packet to interface {}", ifidx);
         if let Some(tx) = self.tx_map.get_mut(&ifidx){
             tx.send(buf).await.unwrap();
         }
         Ok(())
     }
-    
 }
 
 pub struct AfXdp{
     client: AfXdpClient,
     interface_list: HashMap<u32, Interface>,
     xsk_map: Arc<Mutex<XskMap<MapData>>>,
+    interface_queue_table: Arc<Mutex<BpfHashMap<MapData, InterfaceQueue, u32>>>,
     rx_map: HashMap<u32, Arc<RwLock<tokio::sync::mpsc::Receiver<Vec<u8>>>>>,
 }
 
 impl AfXdp{
-    pub fn new(interface_list: HashMap<u32, Interface>, xsk_map: XskMap<MapData>) -> Self{
+    pub fn new(interface_list: HashMap<u32, Interface>, xsk_map: XskMap<MapData>, interface_queue_table: BpfHashMap<MapData, InterfaceQueue, u32>) -> Self{
         let mut rx_map = HashMap::new();
         let mut tx_map = HashMap::new();
-        for (ifidx, interface) in &interface_list{
+        for (ifidx, _interface) in &interface_list{
             let (tx, rx) = tokio::sync::mpsc::channel(100);
             rx_map.insert(*ifidx, Arc::new(RwLock::new(rx)));
             tx_map.insert(*ifidx,tx);
@@ -58,6 +59,7 @@ impl AfXdp{
             ),
             interface_list,
             xsk_map: Arc::new(Mutex::new(xsk_map)),
+            interface_queue_table: Arc::new(Mutex::new(interface_queue_table)),
             rx_map
         }
     }
@@ -70,23 +72,35 @@ impl AfXdp{
 
         let mut jh_list = Vec::new();
 
+        let mut idx = 0;
+
         for (ifidx, interface) in interface_list{
             let recv_tx = recv_tx.clone();
             let xsk_map = self.xsk_map.clone();
+            let interface_queue_table = self.interface_queue_table.clone();
             let rx = rx_map.remove(&ifidx).unwrap();
             
             let jh = tokio::spawn(async move{
-                let _ = interface_runner(interface.clone(), xsk_map, rx.clone(), recv_tx).await;
+                let _ = interface_runner(interface.clone(), xsk_map, interface_queue_table, rx.clone(), recv_tx, idx).await;
                 
             });
             jh_list.push(jh);
+            idx += 1;
 
         }
         Ok(jh_list)
     }
 }
 
-pub async fn interface_runner(interface: Interface, xsk_map: Arc<Mutex<XskMap<MapData>>>, rx: Arc<RwLock<tokio::sync::mpsc::Receiver<Vec<u8>>>>, recv_tx: tokio::sync::mpsc::Sender<(u32,Vec<u8>)>) -> anyhow::Result<()>{
+pub async fn interface_runner(
+    interface: Interface,
+    xsk_map: Arc<Mutex<XskMap<MapData>>>,
+    interface_queue_table: Arc<Mutex<BpfHashMap<MapData, InterfaceQueue, u32>>>,
+    rx: Arc<RwLock<tokio::sync::mpsc::Receiver<Vec<u8>>>>,
+    recv_tx: tokio::sync::mpsc::Sender<(u32,Vec<u8>)>,
+    idx: u32,
+) -> anyhow::Result<()>{
+
     let (device_queue, mut ring_rx, mut ring_tx, recv_desc, recv_buf, send_desc, send_buf) ={
         let alloc = Box::new(PacketMap(MaybeUninit::uninit()));
         let mem = NonNull::new(Box::leak(alloc).0.as_mut_ptr()).unwrap();
@@ -98,7 +112,7 @@ pub async fn interface_runner(interface: Interface, xsk_map: Arc<Mutex<XskMap<Ma
         .rx_tx(
             &sock,
             &SocketConfig {
-                rx_size: NonZeroU32::new(32),
+                rx_size: NonZeroU32::new(1 << 11),
                 tx_size: NonZeroU32::new(1 << 14),
                 bind_flags: SocketConfig::XDP_BIND_NEED_WAKEUP,
                 //bind_flags: SocketConfig::XDP_BIND_ZEROCOPY | SocketConfig::XDP_BIND_NEED_WAKEUP,
@@ -108,8 +122,13 @@ pub async fn interface_runner(interface: Interface, xsk_map: Arc<Mutex<XskMap<Ma
         let ring_tx = rxtx.map_tx().unwrap();
         let ring_rx = rxtx.map_rx().unwrap();
         umem.bind(&rxtx).unwrap();
+
+        let interface_queue = InterfaceQueue::new(interface.ifidx, 0);
+        let mut interface_queue_table = interface_queue_table.lock().unwrap();
+        interface_queue_table.insert(interface_queue, idx, 0).unwrap();
+
         let mut xsk_map = xsk_map.lock().unwrap();
-        xsk_map.set(0, device_queue.as_raw_fd(), 0).unwrap();
+        xsk_map.set(idx, device_queue.as_raw_fd(), 0).unwrap();
 
         let mut recv_frame = umem.frame(BufIdx(0)).unwrap();
         {
@@ -151,12 +170,10 @@ pub async fn interface_runner(interface: Interface, xsk_map: Arc<Mutex<XskMap<Ma
         let mut rx = rx.write().await;
         loop{
             while let Some(msg) = rx.recv().await{
-                info!("Received message to send to socket. Length: {}", msg.len());
                 let s = msg.as_slice();
                 send_buf[..s.len()].copy_from_slice(s); 
                 let mut writer = ring_tx.transmit(1);
-                let res = writer.insert_once(send_desc);
-                info!("insert ret: {}", res);
+                writer.insert_once(send_desc);
                 writer.commit();
             }
         }
@@ -194,53 +211,38 @@ pub async fn interface_runner(interface: Interface, xsk_map: Arc<Mutex<XskMap<Ma
     });
     jh_list.push(jh);
 
-    let mut interval = tokio::time::interval(Duration::from_secs(2));
-    let jh = tokio::spawn(async move{
-        loop{
-            interval.tick().await;
-            info!("Sending empty packet to client");
-            //recv_tx.send((1,Vec::new())).await.unwrap();
-        }
-    });
-    jh_list.push(jh);
-    
-
-    let jh = tokio::spawn(async move{
+    let jh = tokio::task::spawn_blocking(move ||{
         loop{
             let mut receive = ring_rx.receive(1);
-            let mut data = Vec::new();
-            if let Some(desc) = receive.read(){
-                data = recv_buf.to_vec();
+            while let Some(desc) = receive.read(){
+                let eth_packet = if let Some(eth_packet) = EthernetPacket::new(&recv_buf){
+                    eth_packet
+                } else {
+                    info!("Failed to parse ethernet packet");
+                    continue;
+                };
+                let disco_hdr = if let Some(disco_hdr) = DiscoHdrPacket::new(&eth_packet.payload()[..DiscoHdrPacket::LEN]){
+                    disco_hdr
+                } else {
+                    info!("Failed to parse disco packet");
+                    continue;
+                };
+                info!("XDP Received disco packet: {}", disco_hdr);
+
+                let data = recv_buf.to_vec();
+                info!("XDP Received packet size: {}", data.len());
+
                 receive.release();
                 {
                     let mut device_queue = device_queue_mutex.lock().unwrap();
                     let mut writer = device_queue.fill(1);
-                    writer.insert_once(desc.addr);
+                    writer.insert_once(recv_desc.addr);
                     writer.commit();
                 }
-            } 
-            if data.len() == 0{
-                continue;
-            }
-            let (eth, buf) = data.as_slice().split_at(14);
-            match EthernetPacket::new(eth){
-                Some(eth_packet) => {
-                    info!("Received packet: {:?}", eth_packet);
-                    match recv_tx.try_send((interface.ifidx, data)){
-                        Ok(_) => {
-                            info!("Sent packet to client");
-                        },
-                        Err(e) => {
-                            info!("Failed to send packet to client: {}", e);
-                        }
-                    
-                    };
-                    info!("Sent packet to client");
-                },
-                None => {
-                    info!("Failed to parse ethernet packet");
+                if let Err(e) = recv_tx.blocking_send((interface.ifidx, data)){
+                    info!("Failed to send packet to client: {}", e);
                 }
-            }
+            } 
         }
     });
     jh_list.push(jh);

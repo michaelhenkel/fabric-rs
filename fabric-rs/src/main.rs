@@ -7,7 +7,7 @@ use std::{vec, future};
 
 use anyhow::Context;
 use aya::maps::lpm_trie::Key;
-use aya::maps::{LpmTrie, MapData, XskMap};
+use aya::maps::{LpmTrie, MapData, XskMap, HashMap as BpfHashMap};
 use aya::programs::{Xdp, XdpFlags};
 use aya::{include_bytes_aligned, Bpf};
 use aya_log::BpfLogger;
@@ -15,7 +15,7 @@ use clap::{Parser, ValueEnum};
 use log::{debug, error, info, warn, LevelFilter};
 use tokio::signal;
 use fabric_rs_config::{self, InstanceType};
-use fabric_rs_common::{InterfaceConfig, RouteNextHop};
+use fabric_rs_common::{InterfaceConfig, RouteNextHop, InterfaceQueue};
 use kube_virt_rs::flowtable::flowtable::MatchType;
 use fabric_rs_userspace::{UserSpace, interface::interface::Interface};
 use inquire::{error::CustomUserError, length, required, ui::RenderConfig, Text};
@@ -119,6 +119,13 @@ async fn main() -> Result<(), anyhow::Error> {
         panic!("XSKMAP map not found");
     };
 
+    let interface_queue_table = if let Some(interface_queue_table) = bpf.take_map("INTERFACEQUEUETABLE"){
+        let interface_queue_table: BpfHashMap<MapData, InterfaceQueue, u32> = BpfHashMap::try_from(interface_queue_table).unwrap();
+        interface_queue_table
+    } else {
+        panic!("INTERFACEQUEUETABLE map not found");
+    };
+
     let mut jh_list = Vec::new();
     let mut user_space = UserSpace::new(
         interface_list,
@@ -129,7 +136,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 
     let jh: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
-        user_space.run(xsk_map).await
+        user_space.run(xsk_map, interface_queue_table).await
     });
     jh_list.push(jh);
     

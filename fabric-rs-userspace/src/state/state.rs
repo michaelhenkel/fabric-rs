@@ -100,7 +100,6 @@ impl State{
                             }
                         }
                         StateCommand::Add(key_value) => {
-                            info!("state command add key_value: {}", key_value);
                             match key_value{
                                 KeyValue::NEIGHBOR{key, value} => {
                                     nt.add(key.into(), value.into());
@@ -114,7 +113,6 @@ impl State{
                             }
                         },
                         StateCommand::Get{key, tx} => {
-                            info!("state command get");
                             match key{
                                 Key::NEIGHBOR(key) => {
                                     let value = nt.get(key.into());

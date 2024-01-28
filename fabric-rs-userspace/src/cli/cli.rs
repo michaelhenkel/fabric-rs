@@ -17,8 +17,6 @@ pub enum CliCommand{
     },
 }
 
-
-
 impl Cli{
     pub fn new() -> Cli{
         let (tx, rx) = tokio::sync::mpsc::channel(32);
@@ -31,7 +29,7 @@ impl Cli{
         info!("Starting Cli");
         let mut jh_list = Vec::new();
         
-        /*
+        
         let rx = self.rx.clone();
         let jh = tokio::spawn(async move{
             let mut rx = rx.write().await;
@@ -89,12 +87,7 @@ impl Cli{
                 
             }
         });
-        */
-        let jh = tokio::spawn(async move{loop{}});
         jh_list.push(jh);
-        let jh = tokio::spawn(async move{loop{}});
-        jh_list.push(jh);
-
         Ok(jh_list)
     }
 

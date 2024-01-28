@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use core::{mem, f32::consts::E};
+use core::mem;
 use network_types::{
     eth::{EthHdr, EtherType},
     ip::{Ipv4Hdr, IpProto},
@@ -14,7 +14,7 @@ use aya_bpf::{
     maps::{HashMap, lpm_trie::{LpmTrie, Key}, XskMap}, helpers::bpf_redirect,
 };
 use aya_log_ebpf::{info, warn};
-use fabric_rs_common::{InterfaceConfig, RouteNextHop};
+use fabric_rs_common::{DiscoHdr, InterfaceConfig, InterfaceQueue, RouteNextHop};
 
 #[map(name = "INTERFACECONFIG")]
 static mut INTERFACECONFIG: HashMap<u32, InterfaceConfig> =
@@ -31,6 +31,10 @@ static mut ROUTINGTABLE: LpmTrie<u32, [RouteNextHop;32]> =
 #[map(name = "XSKMAP")]
 static mut XSKMAP: XskMap = XskMap::with_max_entries(8, 0);
 
+#[map(name = "INTERFACEQUEUETABLE")]
+static mut INTERFACEQUEUETABLE: HashMap<InterfaceQueue, u32> =
+    HashMap::<InterfaceQueue, u32>::with_max_entries(16, 0);
+
 
 pub enum InstanceType {
     INSTANCE,
@@ -46,51 +50,57 @@ pub fn fabric_rs(ctx: XdpContext) -> u32 {
 }
 
 fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
-    
+    let packet_size = ctx.data_end() - ctx.data();
     let ingress_if_idx = unsafe { (*ctx.ctx).ingress_ifindex };
     let queue_idx = unsafe { (*ctx.ctx).rx_queue_index };
-    info!(
-        &ctx,
-        "ingress_if_idx: {}, queue_idx: {}", ingress_if_idx, queue_idx
-    );
-
+    let interface_queue = InterfaceQueue::new(ingress_if_idx, queue_idx);
+    let queue_idx = unsafe { INTERFACEQUEUETABLE.get(&interface_queue) };
     let eth_hdr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_ABORTED)?;
     
     if unsafe { (*eth_hdr).ether_type } == EtherType::Loop {
-        info!(&ctx, "disco packet received");
-
-        if let Some(fd) = unsafe { XSKMAP.get(queue_idx)}{
-            info!(&ctx, "xsk_map.get returned fd: {}", fd);
+        let disco_hdr = ptr_at::<DiscoHdr>(&ctx, EthHdr::LEN)
+            .ok_or(xdp_action::XDP_ABORTED)?;
+        let disco_ip = unsafe { (*disco_hdr).ip };
+        let disco_mac = unsafe { (*disco_hdr).mac };
+        let disco_op = unsafe { (*disco_hdr).op };
+        info!(&ctx,
+            "ip: {:i} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x} op: {}",
+            u32::from_be(disco_ip),
+            disco_mac[0],
+            disco_mac[1],
+            disco_mac[2],
+            disco_mac[3],
+            disco_mac[4],
+            disco_mac[5],
+            disco_op
+        );
+        let queue_idx = if let Some(queue_idx) = queue_idx{
+            *queue_idx
         } else {
-            info!(&ctx, "xsk_map.get returned None");
-        }
+            return Ok(xdp_action::XDP_PASS);
+        };
 
         match unsafe{ XSKMAP.redirect(queue_idx, 0) }{
             Ok(res) => {
-                info!(&ctx, "bpf_redirect returned: {}", res);
                 return Ok(res)
             },
             Err(e) => {
-                info!(&ctx, "bpf_redirect returned error: {}", e);
                 return Ok(xdp_action::XDP_PASS);
             }
         }
     }
-
-
-
     if unsafe { (*eth_hdr).ether_type } == EtherType::Arp {
         info!(&ctx, "arp packet received");
 
-        if let Some(fd) = unsafe { XSKMAP.get(queue_idx)}{
-            info!(&ctx, "xsk_map.get returned fd: {}", fd);
+        let queue_idx = if let Some(queue_idx) = queue_idx{
+            *queue_idx
         } else {
-            info!(&ctx, "xsk_map.get returned None");
-        }
+            info!(&ctx, "queue_idx not found");
+            return Ok(xdp_action::XDP_PASS);
+        };
 
         match unsafe{ XSKMAP.redirect(queue_idx, 0) }{
             Ok(res) => {
-                info!(&ctx, "bpf_redirect returned: {}", res);
                 return Ok(res)
             },
             Err(e) => {
@@ -103,26 +113,6 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
     let ipv4_hdr = ptr_at::<Ipv4Hdr>(&ctx, EthHdr::LEN)
         .ok_or(xdp_action::XDP_ABORTED)?;
 
-    if unsafe { (*ipv4_hdr).proto } == IpProto::Icmp {
-        info!(&ctx, "icmp packet received");
-
-        if let Some(fd) = unsafe { XSKMAP.get(queue_idx)}{
-            info!(&ctx, "xsk_map.get returned fd: {}", fd);
-        } else {
-            info!(&ctx, "xsk_map.get returned None");
-        }
-
-        match unsafe{ XSKMAP.redirect(queue_idx, 0) }{
-            Ok(res) => {
-                info!(&ctx, "bpf_redirect returned: {}", res);
-                return Ok(res)
-            },
-            Err(e) => {
-                info!(&ctx, "bpf_redirect returned error: {}", e);
-                return Ok(xdp_action::XDP_PASS);
-            }
-        }
-    }
 
     let dst_ip = unsafe { (*ipv4_hdr).dst_addr };
     let src_ip = unsafe { (*ipv4_hdr).src_addr };
@@ -176,7 +166,6 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
                     u32::from_be(dst_ip)
                 );
                 let res = unsafe { bpf_redirect(nh.ifidx, 0)};
-                info!(&ctx, "bpf_redirect returned: {}", res);
                 return Ok(res as u32)
             }
         } else {

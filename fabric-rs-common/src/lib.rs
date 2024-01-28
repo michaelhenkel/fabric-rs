@@ -1,4 +1,5 @@
 #![no_std]
+use core::mem;
 
 #[repr(C, packed)]
 #[derive(Debug, Copy, Clone, Default)]
@@ -35,3 +36,44 @@ pub struct RouteNextHop {
 }
 #[cfg(feature = "user")]
 unsafe impl aya::Pod for RouteNextHop {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct InterfaceQueue {
+    pub ifidx: u32,
+    pub queue: u32,
+}
+
+impl InterfaceQueue {
+    pub fn new(ifidx: u32, queue: u32) -> Self {
+        InterfaceQueue { ifidx, queue }
+    }
+}
+
+#[cfg(feature = "user")]
+unsafe impl aya::Pod for InterfaceQueue {}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DiscoHdr{
+    pub id: u32,
+    pub ip: u32,
+    pub len: u16,
+    pub mac: [u8;6],
+    pub op: u8,
+}
+
+impl DiscoHdr{
+    pub const LEN: usize = mem::size_of::<DiscoHdr>();
+}
+
+#[derive(Clone, Copy)]
+pub struct DiscoRouteHdr{
+    pub ip: u32,
+    pub hops: u32,
+    pub prefix_len: u8,
+}
+
+impl DiscoRouteHdr{
+    pub const LEN: usize = mem::size_of::<DiscoRouteHdr>();
+}
