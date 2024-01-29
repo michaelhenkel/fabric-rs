@@ -36,12 +36,7 @@ impl Display for DiscoHdrPacket<'_>{
         let len = self.get_len();
         let mut route_hdr_str = "".to_string();
         for i in 0..len as usize{
-            let offset = i * DiscoRouteHdr::LEN;
-            info!("OFFSET: {}", offset);
-            info!("PAYLOAD: {:?}", self.payload());
-            info!("PAYLOAD LEN: {}", self.payload().len());
-            info!("LEN: {}", len);
-            
+            let offset = i * DiscoRouteHdr::LEN;            
             let pl = &self.payload()[offset..offset + DiscoRouteHdr::LEN];
             let disco_route_header: &[u8;DiscoRouteHdr::LEN] = &pl.try_into().unwrap();
             let route_hdr = DiscoRouteHdrPacket::new(disco_route_header).unwrap();
@@ -61,8 +56,12 @@ pub struct DiscoRouteHdr{
     pub payload: Vec<u8>
 }
 
-#[derive(Clone)]
-pub struct Align(u8, u8, u8);
+#[derive(Clone, Packet)]
+pub struct DiscoRouteNextHopHdr{
+    pub nh_ip: u32be,
+    #[payload]
+    pub payload: Vec<u8>
+}
 
 impl Display for MutableDiscoHdrPacket<'_>{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

@@ -9,7 +9,7 @@ use network_types::eth::EthHdr;
 use pnet::{packet::{arp::ArpPacket, ethernet::{EtherType, EtherTypes, EthernetPacket, MutableEthernetPacket}, FromPacket}, util::MacAddr};
 use send_receive::send_receive::{SendReceive, SendReceiveClient};
 use state::{
-    state::{Key, KeyValue, State, StateClient},
+    state::{Key, KeyValue, State, StateClient, Value},
         table::{neighbor_table::neighbor_table::{Neighbor, NeighborInterface},
         routing_table::routing_table::{Route, RouteNextHop as RNH, RouteNextHopList, RouteOrigin}
 }};
@@ -197,8 +197,7 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
     } else {
         return Err(anyhow::anyhow!("Error parsing disco packet"));
     };
-    if disco_packet_hdr.get_op() == 0 {
-        
+    if disco_packet_hdr.get_op() == 0 { 
         let neighbor_interface = NeighborInterface::new(
             disco_packet_hdr.get_ip(),
             eth_packet.get_source().into(),
@@ -234,18 +233,34 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
         for local_route in &local_routes{
             let new_disco_route_packet_hdr = match local_route{
                 KeyValue::ROUTE { key: (ip,prefix_len), value: route } => {
+                 
+                    let local = match route.origin{
+                        RouteOrigin::LOCAL => {
+                            if *ip != interface.ip.into(){
+                                continue
+                            }
+                            true
+                        },
+                        RouteOrigin::REMOTE => {
+                            false
+                        },
+                    };
                     let mut from_neighbor = false;
+                    let mut hops = 1;
                     for rnh in route.get_next_hops(){
                         if disco_packet_hdr.get_id() == rnh.originator_id{
                             from_neighbor = true;
                         }
+                        if !local{
+                            hops = rnh.hops + 1;
+                        }    
                     }
                     if !from_neighbor{
                         let mut disco_route_hdr_buffer = [0u8; DiscoRouteHdr::LEN];
                         let mut disco_route_hdr_packet = MutableDiscoRouteHdrPacket::new(&mut disco_route_hdr_buffer).unwrap();
                         disco_route_hdr_packet.set_ip(*ip);
                         disco_route_hdr_packet.set_prefix_len(*prefix_len as u32);
-                        disco_route_hdr_packet.set_hops(3);
+                        disco_route_hdr_packet.set_hops(hops);
                         Some(disco_route_hdr_packet.packet().to_vec())
                     } else {
                         None
@@ -259,7 +274,6 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
             }
         }
         if route_count > 0 {
-
             let mut disco_packet_buffer = [0u8; DiscoHdr::LEN];
             let mut disco_packet = MutableDiscoHdrPacket::new(&mut disco_packet_buffer).unwrap();
             disco_packet.set_id(id);
@@ -268,58 +282,93 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
             disco_packet.set_len(route_count);
             let mut disco_packet = disco_packet.packet().to_vec();
             disco_packet.extend(routes.clone());
-
-
-
             let mut ethernet_packet_buffer = [0u8; EthHdr::LEN];
             let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_packet_buffer).unwrap();
             ethernet_packet.set_destination(eth_packet.get_source());
             ethernet_packet.set_source(interface.mac.into());
             ethernet_packet.set_ethertype(EtherType(0x0060));
-
             let mut ethernet_packet = ethernet_packet.packet().to_vec();
             ethernet_packet.extend(disco_packet);
-
             af_xdp_client.send(interface.ifidx, ethernet_packet).await?;
         }
-
     }
     if disco_packet_hdr.get_op() == 1 {
-        //info!("DISCOROUTEPACKET: {}, pl: {}", disco_packet_hdr,eth_packet.payload().len() );
-        let disco_route_packet = &eth_packet.payload()[DiscoHdr::LEN..];
-        let number_of_route_headers = disco_packet_hdr.get_len();
+        let number_of_route_headers = disco_packet_hdr.get_len() as usize;
+        let mut route_list = HashMap::new();
         for i in 0..number_of_route_headers{
-            /*
-            let disco_route_hdr_packet = if let Some(disco_route_hdr_packet) = DiscoRouteHdrPacket::new(&disco_route_packet[(i*DiscoRouteHdr::LEN) as usize..(i*DiscoRouteHdr::LEN + DiscoRouteHdr::LEN) as usize]){
-                disco_route_hdr_packet
+            let start = i*DiscoRouteHdr::LEN + DiscoHdr::LEN;
+            let end = start + DiscoRouteHdr::LEN;
+            let disco_route_packet = if let Some(disco_route_packet) = DiscoRouteHdrPacket::new(&eth_packet.payload()[start..end]){
+                disco_route_packet
             } else {
                 continue;
             };
-            info!("Disco route header: {}", disco_route_hdr_packet);
-            */
-            /*
-            let ip = disco_route_hdr_packet.get_ip();
-            let prefix_len = disco_route_hdr_packet.get_prefix_len();
-            let hops = disco_route_hdr_packet.get_hops();
+            
+            info!("Disco route header: {}", disco_route_packet);
+            
+            
+            let ip = disco_route_packet.get_ip();
+            let prefix_len = disco_route_packet.get_prefix_len();
+            let hops = disco_route_packet.get_hops();
             let route_next_hop = RNH::new(
                 disco_packet_hdr.get_id(),
-                ip,
+                disco_packet_hdr.get_ip(),
                 hops,
                 interface.ifidx,
                 eth_packet.get_source().into(),
                 disco_packet_hdr.get_mac().into(),
             );
-            let route_next_hop_list = RouteNextHopList::new();
-            route_next_hop_list.add(route_next_hop);
-            let route = Route::new(
-                RouteOrigin::REMOTE,
-                route_next_hop_list,
-            );
-            let route_value = KeyValue::ROUTE { key: (ip, prefix_len), value: route };
-            state_client.add(route_value).await?;
-            */
+            route_list.insert((ip, prefix_len), route_next_hop);
         }
 
+        for ((ip, prefix_len), rnh) in &route_list{
+            let route_value = state_client.get(Key::ROUTE(*ip, *prefix_len as u8)).await?;
+            let route = if let Some(value) = route_value{
+                match value{
+                    Value::ROUTE(route) => {
+                        Some(route)
+                    },
+                    _ => {
+                        None
+                    }
+                }
+            } else {
+                None
+            };
+            let new_route = if let Some(mut route) = route {
+                let mut remove_list = Vec::new();
+                let mut add_list = Vec::new();
+                for route_rnh in route.get_next_hops_mut(){
+                    if rnh.hops > route_rnh.hops {
+                        continue;
+                    } else if rnh.hops < route_rnh.hops {
+                        remove_list.push(route_rnh.clone());
+                        if route_rnh != rnh{
+                            add_list.push(rnh.clone());
+                        }
+                    } else if route_rnh != rnh{
+                        add_list.push(rnh.clone());
+                    }
+                }
+                for rnh in remove_list{
+                    route.next_hops.remove(rnh);
+                }
+                for rnh in add_list{
+                    route.next_hops.add(rnh);
+                }
+                route
+            } else {
+                let mut route_next_hop_list = RouteNextHopList::new();
+                route_next_hop_list.add(rnh.clone());
+                let route = Route::new(
+                    RouteOrigin::REMOTE,
+                    route_next_hop_list,
+                );
+                route
+            };
+            let route_value = KeyValue::ROUTE { key: (*ip, *prefix_len as u8), value: new_route };
+            state_client.add(route_value).await?;
+        }
     }
     Ok(())
 }

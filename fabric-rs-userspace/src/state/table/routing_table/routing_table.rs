@@ -100,6 +100,10 @@ impl Route{
     pub fn get_next_hops(&self) -> &Vec<RouteNextHop>{
         &self.next_hops.0
     }
+
+    pub fn get_next_hops_mut(&mut self) -> &mut Vec<RouteNextHop>{
+        &mut self.next_hops.0
+    }
 }
 
 impl Display for Route{
@@ -162,6 +166,9 @@ impl RouteNextHopList{
     }
     pub fn add(&mut self, nh: RouteNextHop){
         self.0.push(nh);
+    }
+    pub fn remove(&mut self, nh: RouteNextHop){
+        self.0.retain(|x| *x != nh);
     }
 }
 

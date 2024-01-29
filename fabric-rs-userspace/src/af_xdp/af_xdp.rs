@@ -164,7 +164,6 @@ pub async fn interface_runner(
         loop{
             while let Some(msg) = rx.recv().await{
                 let s = msg.as_slice();
-                info!("SEND PACKET SIZE: {}", s.len());
                 send_buf[..s.len()].copy_from_slice(s); 
                 let mut writer = ring_tx.transmit(1);
                 send_desc.len = s.len() as u32;
@@ -212,26 +211,7 @@ pub async fn interface_runner(
             let mut frame_idx = 0;
             while let Some(desc) = receive.read(){
                 let buf = &recv_buf.as_ref()[desc.addr as usize..(desc.addr as usize + desc.len as usize)];
-                let eth_packet = if let Some(eth_packet) = EthernetPacket::new(&buf){
-                    eth_packet
-                } else {
-                    info!("Failed to parse ethernet packet");
-                    continue;
-                };
-                let disco_hdr = if let Some(disco_hdr) = DiscoHdrPacket::new(&eth_packet.payload()){
-                    disco_hdr
-                } else {
-                    info!("Failed to parse disco packet");
-                    continue;
-                };
-                if disco_hdr.get_op() == 1 {
-                    info!("XDP Received packet size: {}", buf.len());
-                    info!("XDP Received disco packet: {}", disco_hdr);
-                }
-
                 let data = buf.to_vec();
-                
-
                 receive.release();
                 {
                     let mut device_queue = device_queue_mutex.lock().unwrap();
