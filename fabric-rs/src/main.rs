@@ -29,6 +29,8 @@ struct Opt {
     config: String,
     #[clap(short, long)]
     log: Option<bool>,
+    #[clap(short, long)]
+    send: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -136,7 +138,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
 
     let jh: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
-        user_space.run(xsk_map, interface_queue_table).await
+        user_space.run(xsk_map, interface_queue_table, opt.send).await
     });
     jh_list.push(jh);
     

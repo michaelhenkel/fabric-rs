@@ -16,7 +16,6 @@ use crate::interface::interface::Interface;
 #[repr(align(4096))]
 struct PacketMap(MaybeUninit<[u8; 1 << 20]>);
 
-
 #[derive(Clone)]
 pub struct AfXdpClient{
     tx_map: HashMap<u32, tokio::sync::mpsc::Sender<Vec<u8>>>,
@@ -101,13 +100,15 @@ pub async fn interface_runner(
     idx: u32,
 ) -> anyhow::Result<()>{
 
-    let (device_queue, mut ring_rx, mut ring_tx, recv_desc, recv_buf, send_desc, send_buf) ={
+    let frame_number = 10;
+
+    let (fq_cq, mut ring_rx, mut ring_tx, recv_buf, mut send_desc, send_buf) ={
         let alloc = Box::new(PacketMap(MaybeUninit::uninit()));
         let mem = NonNull::new(Box::leak(alloc).0.as_mut_ptr()).unwrap();
         let umem = unsafe { Umem::new(UmemConfig::default(), mem) }.unwrap();
         let info = ifinfo(&interface.name, Some(0)).unwrap();
         let sock = Socket::with_shared(&info, &umem).unwrap();
-        let mut device_queue = umem.fq_cq(&sock).unwrap();
+        let mut fq_cq = umem.fq_cq(&sock).unwrap();
         let rxtx = umem
         .rx_tx(
             &sock,
@@ -128,35 +129,27 @@ pub async fn interface_runner(
         interface_queue_table.insert(interface_queue, idx, 0).unwrap();
 
         let mut xsk_map = xsk_map.lock().unwrap();
-        xsk_map.set(idx, device_queue.as_raw_fd(), 0).unwrap();
+        xsk_map.set(idx, fq_cq.as_raw_fd(), 0).unwrap();
 
-        let mut recv_frame = umem.frame(BufIdx(0)).unwrap();
+        let mut frame = umem.frame(BufIdx(0)).unwrap();
+
         {
-            let mut writer = device_queue.fill(1);
-            writer.insert_once(recv_frame.offset);
+            let mut writer = fq_cq.fill(1);
+            writer.insert_once(frame.offset);
             writer.commit();
         }
 
-        let recv_buf = unsafe { recv_frame.addr.as_mut() };
-
-        let recv_desc = XdpDesc{
-            addr: recv_frame.offset,
-            len: 38,
-            options: 0,
-        };
-
-
+        let recv_buf = unsafe { frame.addr.as_mut() };
         let mut send_frame = umem.frame(BufIdx(0)).unwrap();
  
         let send_buf = unsafe { send_frame.addr.as_mut() };
 
         let send_desc = XdpDesc{
             addr: send_frame.offset,
-            len: 38,
+            len: 0,
             options: 0,
         };
-
-        (device_queue, ring_rx, ring_tx, recv_desc, recv_buf, send_desc, send_buf)
+        (fq_cq, ring_rx, ring_tx, recv_buf, send_desc, send_buf)
     };
 
     let mut jh_list = Vec::new();
@@ -171,8 +164,10 @@ pub async fn interface_runner(
         loop{
             while let Some(msg) = rx.recv().await{
                 let s = msg.as_slice();
+                info!("SEND PACKET SIZE: {}", s.len());
                 send_buf[..s.len()].copy_from_slice(s); 
                 let mut writer = ring_tx.transmit(1);
+                send_desc.len = s.len() as u32;
                 writer.insert_once(send_desc);
                 writer.commit();
             }
@@ -181,7 +176,7 @@ pub async fn interface_runner(
     jh_list.push(jh);
 
     let mut interval = tokio::time::interval(Duration::from_millis(10));
-    let device_queue_mutex = Arc::new(Mutex::new(device_queue));
+    let device_queue_mutex = Arc::new(Mutex::new(fq_cq));
     let device_queue = device_queue_mutex.clone();
     let jh = tokio::spawn(async move{
         loop{
@@ -213,35 +208,41 @@ pub async fn interface_runner(
 
     let jh = tokio::task::spawn_blocking(move ||{
         loop{
-            let mut receive = ring_rx.receive(1);
+            let mut receive = ring_rx.receive(frame_number);
+            let mut frame_idx = 0;
             while let Some(desc) = receive.read(){
-                let eth_packet = if let Some(eth_packet) = EthernetPacket::new(&recv_buf){
+                let buf = &recv_buf.as_ref()[desc.addr as usize..(desc.addr as usize + desc.len as usize)];
+                let eth_packet = if let Some(eth_packet) = EthernetPacket::new(&buf){
                     eth_packet
                 } else {
                     info!("Failed to parse ethernet packet");
                     continue;
                 };
-                let disco_hdr = if let Some(disco_hdr) = DiscoHdrPacket::new(&eth_packet.payload()[..DiscoHdrPacket::LEN]){
+                let disco_hdr = if let Some(disco_hdr) = DiscoHdrPacket::new(&eth_packet.payload()){
                     disco_hdr
                 } else {
                     info!("Failed to parse disco packet");
                     continue;
                 };
-                info!("XDP Received disco packet: {}", disco_hdr);
+                if disco_hdr.get_op() == 1 {
+                    info!("XDP Received packet size: {}", buf.len());
+                    info!("XDP Received disco packet: {}", disco_hdr);
+                }
 
-                let data = recv_buf.to_vec();
-                info!("XDP Received packet size: {}", data.len());
+                let data = buf.to_vec();
+                
 
                 receive.release();
                 {
                     let mut device_queue = device_queue_mutex.lock().unwrap();
-                    let mut writer = device_queue.fill(1);
-                    writer.insert_once(recv_desc.addr);
+                    let mut writer = device_queue.fill(frame_number);
+                    writer.insert_once(desc.addr);
                     writer.commit();
                 }
                 if let Err(e) = recv_tx.blocking_send((interface.ifidx, data)){
                     info!("Failed to send packet to client: {}", e);
                 }
+                frame_idx += 1;
             } 
         }
     });
@@ -273,51 +274,3 @@ enum DeviceCommand{
     FILL(XdpDesc),
     COMPLETE,
 }
-
-fn prepare_buffer(offset: u64, buffer: &mut [u8]) -> XdpDesc {
-    buffer[..ARP.len()].copy_from_slice(&ARP[..]);
-    let length: u32 = 0;
-    let extra = length.saturating_sub(ARP.len() as u32);
-
-    XdpDesc {
-        addr: offset,
-        len: ARP.len() as u32 + extra,
-        options: 0,
-    }
-}
-
-#[rustfmt::skip]
-static ARP: [u8; 14+28] = [
-    0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
-    0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-    0x08, 0x06,
-
-    0x00, 0x01,
-    0x08, 0x00, 0x06, 0x04,
-    0x00, 0x01,
-    0x11, 0x12, 0x13, 0x14, 0x15, 0x16,
-    0x21, 0x22, 0x23, 0x24,
-    0x31, 0x32, 0x33, 0x34, 0x35, 0x36,
-    0x41, 0x42, 0x43, 0x44,
-];
-
-/*
-            //let mut frames = Vec::new();
-
-            //{
-                /*  
-                for i in 0..10{
-                    let frame = umem.frame(BufIdx(i)).unwrap();
-                    frames.push(frame.offset);
-                }
-                */
-            
-                let frame = umem.frame(BufIdx(0)).unwrap();
-            {
-                let mut writer = device_queue.fill(1);
-                writer.insert_once(frame.offset);
-                //let x = writer.insert(frames.into_iter());
-                //info!("Inserted {} frames", x);
-                writer.commit();
-
-*/

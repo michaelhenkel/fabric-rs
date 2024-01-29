@@ -14,7 +14,7 @@ use aya_bpf::{
     maps::{HashMap, lpm_trie::{LpmTrie, Key}, XskMap}, helpers::bpf_redirect,
 };
 use aya_log_ebpf::{info, warn};
-use fabric_rs_common::{DiscoHdr, InterfaceConfig, InterfaceQueue, RouteNextHop};
+use fabric_rs_common::{DiscoHdr, DiscoRouteHdr, InterfaceConfig, InterfaceQueue, RouteNextHop};
 
 #[map(name = "INTERFACECONFIG")]
 static mut INTERFACECONFIG: HashMap<u32, InterfaceConfig> =
@@ -63,6 +63,11 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
         let disco_ip = unsafe { (*disco_hdr).ip };
         let disco_mac = unsafe { (*disco_hdr).mac };
         let disco_op = unsafe { (*disco_hdr).op };
+        if disco_op == 1 {
+            info!(&ctx, "PACKETLEN: {}", packet_size);
+        }
+        /*
+        let disco_op = unsafe { (*disco_hdr).op };
         info!(&ctx,
             "ip: {:i} mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x} op: {}",
             u32::from_be(disco_ip),
@@ -74,6 +79,23 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
             disco_mac[5],
             disco_op
         );
+
+        if disco_op == 1 {
+            
+            info!(&ctx, "packet len: {}", packet_size);
+                let offset = EthHdr::LEN + DiscoHdr::LEN;
+                let disco_route_hdr = ptr_at::<DiscoRouteHdr>(&ctx, offset)
+                .ok_or(xdp_action::XDP_ABORTED)?;
+                info!(
+                    &ctx,
+                    "ip: {:i} hops: {} prefix_len: {}",
+                    u32::from_be(unsafe { (*disco_route_hdr).ip }),
+                    u32::from_be(unsafe { (*disco_route_hdr).hops }),
+                    unsafe { (*disco_route_hdr).prefix_len }
+                );
+        }
+        */
+
         let queue_idx = if let Some(queue_idx) = queue_idx{
             *queue_idx
         } else {

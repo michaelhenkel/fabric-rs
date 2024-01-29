@@ -1,14 +1,18 @@
-use std::{collections::HashMap, net::IpAddr, sync::{Arc, Mutex}};
+use std::{collections::HashMap, net::IpAddr, num, sync::{Arc, Mutex}};
 use af_xdp::af_xdp::AfXdpClient;
 use aya::maps::{LpmTrie, MapData, XskMap, HashMap as BpfHashMap};
-use disco_rs::{DiscoHdr, DiscoHdrPacket, MutableDiscoHdrPacket};
+use disco_rs::{DiscoHdr, DiscoHdrPacket, DiscoRouteHdr, DiscoRouteHdrPacket, MutableDiscoHdrPacket, MutableDiscoRouteHdrPacket};
 use fabric_rs_common::{InterfaceQueue, RouteNextHop};
 use interface::interface::Interface;
 use log::{error, info};
 use network_types::eth::EthHdr;
-use pnet::{packet::{arp::ArpPacket, ethernet::{EtherType, EtherTypes, EthernetPacket, MutableEthernetPacket}}, util::MacAddr};
+use pnet::{packet::{arp::ArpPacket, ethernet::{EtherType, EtherTypes, EthernetPacket, MutableEthernetPacket}, FromPacket}, util::MacAddr};
 use send_receive::send_receive::{SendReceive, SendReceiveClient};
-use state::{state::{Key, KeyValue, State, StateClient}, table::neighbor_table::neighbor_table::{Neighbor, NeighborInterface}};
+use state::{
+    state::{Key, KeyValue, State, StateClient},
+        table::{neighbor_table::neighbor_table::{Neighbor, NeighborInterface},
+        routing_table::routing_table::{Route, RouteNextHop as RNH, RouteNextHopList, RouteOrigin}
+}};
 use cli::cli::Cli;
 use pnet::packet::Packet;
 use crate::af_xdp::af_xdp::AfXdp;
@@ -42,12 +46,14 @@ impl UserSpace{
             state_client: None,
         }
     }
-    pub async fn run(&mut self, xsk_map: XskMap<MapData>, interface_queue_table: BpfHashMap<MapData, InterfaceQueue, u32>) -> anyhow::Result<()>{
+    pub async fn run(&mut self, xsk_map: XskMap<MapData>, interface_queue_table: BpfHashMap<MapData, InterfaceQueue, u32>, send: Option<bool>) -> anyhow::Result<()>{
         let (recv_tx, recv_rx) = tokio::sync::mpsc::channel(100);
 
         let state = State::new(self.lpm_trie.clone());
         let state_client = state.client();
         self.state_client = Some(state_client.clone());
+
+        
 
         let mut af_xdp = AfXdp::new(self.interfaces.clone(), xsk_map, interface_queue_table);
         let af_xdp_client = af_xdp.client();
@@ -57,6 +63,8 @@ impl UserSpace{
         let jh = state.run();
         jh_list.extend(jh.await?);
         info!("{} state tasks running", jh_list.len());
+
+        local_routes(self.interfaces.clone(),  state_client.clone(), self.id).await?;
         
         let jh = af_xdp.run(recv_tx);
         jh_list.extend(jh.await?);
@@ -66,9 +74,16 @@ impl UserSpace{
         jh_list.push(jh.await?);
         info!("{} receiver tasks running", jh_list.len());
         
-        let jh = self.disco_sender( af_xdp_client);
-        jh_list.push(jh.await?);
-        info!("{} disco sender tasks running", jh_list.len());
+        let send = if let Some(send) = send{
+            send
+        } else {
+            true
+        };
+        if send{
+            let jh = self.disco_sender( af_xdp_client);
+            jh_list.push(jh.await?);
+            info!("{} disco sender tasks running", jh_list.len());
+        }
         
         let cli = Cli::new();
         let jh = cli.run(state_client);
@@ -83,6 +98,7 @@ impl UserSpace{
     }
 
     pub async fn receiver(&self, mut rx: tokio::sync::mpsc::Receiver<(u32, Vec<u8>)>, af_xdp_client: AfXdpClient, state_client: StateClient) -> anyhow::Result<tokio::task::JoinHandle<()>>{
+        let id = self.id;
         let interfaces = self.interfaces.clone();
         let jh = tokio::spawn(async move{
             loop{
@@ -109,7 +125,7 @@ impl UserSpace{
                             } else {
                                 continue;
                             };
-                            if let Err(e) = disco_handler(eth_packet, interface, state_client.clone()).await{
+                            if let Err(e) = disco_handler(eth_packet, interface, state_client.clone(), af_xdp_client.clone(), id).await{
                                 error!("Error handling disco: {:?}", e);
                             }
                         },
@@ -153,16 +169,34 @@ impl UserSpace{
     }
 }
 
+pub async fn local_routes(interface_list: HashMap<u32, Interface>, state_client: StateClient, id: u32) -> anyhow::Result<()>{
+    for (_ifidx, interface) in &interface_list{
+        let mut route_next_hop_list = RouteNextHopList::new();
+        let route_next_hop = RNH::new(
+            id,
+            interface.ip.into(),
+            0,
+            interface.ifidx,
+            interface.mac.into(),
+            interface.mac.into(),
+        );
+        route_next_hop_list.add(route_next_hop);
+        let route = Route::new(
+            RouteOrigin::LOCAL,
+            route_next_hop_list,
+        );
+        let route_value = KeyValue::ROUTE { key: (interface.ip.into(), 32), value: route };
+        state_client.add(route_value).await?;
+    }
+    Ok(())
+}
 
-pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface, state_client: StateClient) -> anyhow::Result<()>{
-    info!("eth payload len: {}, offset: {} end:", eth_packet.payload().len(), EthHdr::LEN, );
-
+pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface, state_client: StateClient, mut af_xdp_client: AfXdpClient, id: u32) -> anyhow::Result<()>{
     let disco_packet_hdr = if let Some(disco_packet_hdr) = DiscoHdrPacket::new(eth_packet.payload()[..DiscoHdr::LEN].as_ref()){
         disco_packet_hdr
     } else {
         return Err(anyhow::anyhow!("Error parsing disco packet"));
     };
-    info!("Disco packet: {}", disco_packet_hdr);
     if disco_packet_hdr.get_op() == 0 {
         
         let neighbor_interface = NeighborInterface::new(
@@ -193,8 +227,98 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
                 return Err(e)
             }
         }
+
+        let local_routes = state_client.list(state::table::table::TableType::RouteTable).await?;
+        let mut routes = Vec::new();
+        let mut route_count = 0;
+        for local_route in &local_routes{
+            let new_disco_route_packet_hdr = match local_route{
+                KeyValue::ROUTE { key: (ip,prefix_len), value: route } => {
+                    let mut from_neighbor = false;
+                    for rnh in route.get_next_hops(){
+                        if disco_packet_hdr.get_id() == rnh.originator_id{
+                            from_neighbor = true;
+                        }
+                    }
+                    if !from_neighbor{
+                        let mut disco_route_hdr_buffer = [0u8; DiscoRouteHdr::LEN];
+                        let mut disco_route_hdr_packet = MutableDiscoRouteHdrPacket::new(&mut disco_route_hdr_buffer).unwrap();
+                        disco_route_hdr_packet.set_ip(*ip);
+                        disco_route_hdr_packet.set_prefix_len(*prefix_len as u32);
+                        disco_route_hdr_packet.set_hops(3);
+                        Some(disco_route_hdr_packet.packet().to_vec())
+                    } else {
+                        None
+                    }
+                }
+                _ => {None}
+            };
+            if let Some(new_disco_packet_hdr) = new_disco_route_packet_hdr{
+                routes.extend(new_disco_packet_hdr);
+                route_count += 1;
+            }
+        }
+        if route_count > 0 {
+
+            let mut disco_packet_buffer = [0u8; DiscoHdr::LEN];
+            let mut disco_packet = MutableDiscoHdrPacket::new(&mut disco_packet_buffer).unwrap();
+            disco_packet.set_id(id);
+            disco_packet.set_ip(interface.ip.into());
+            disco_packet.set_op(1);
+            disco_packet.set_len(route_count);
+            let mut disco_packet = disco_packet.packet().to_vec();
+            disco_packet.extend(routes.clone());
+
+
+
+            let mut ethernet_packet_buffer = [0u8; EthHdr::LEN];
+            let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_packet_buffer).unwrap();
+            ethernet_packet.set_destination(eth_packet.get_source());
+            ethernet_packet.set_source(interface.mac.into());
+            ethernet_packet.set_ethertype(EtherType(0x0060));
+
+            let mut ethernet_packet = ethernet_packet.packet().to_vec();
+            ethernet_packet.extend(disco_packet);
+
+            af_xdp_client.send(interface.ifidx, ethernet_packet).await?;
+        }
+
     }
     if disco_packet_hdr.get_op() == 1 {
+        //info!("DISCOROUTEPACKET: {}, pl: {}", disco_packet_hdr,eth_packet.payload().len() );
+        let disco_route_packet = &eth_packet.payload()[DiscoHdr::LEN..];
+        let number_of_route_headers = disco_packet_hdr.get_len();
+        for i in 0..number_of_route_headers{
+            /*
+            let disco_route_hdr_packet = if let Some(disco_route_hdr_packet) = DiscoRouteHdrPacket::new(&disco_route_packet[(i*DiscoRouteHdr::LEN) as usize..(i*DiscoRouteHdr::LEN + DiscoRouteHdr::LEN) as usize]){
+                disco_route_hdr_packet
+            } else {
+                continue;
+            };
+            info!("Disco route header: {}", disco_route_hdr_packet);
+            */
+            /*
+            let ip = disco_route_hdr_packet.get_ip();
+            let prefix_len = disco_route_hdr_packet.get_prefix_len();
+            let hops = disco_route_hdr_packet.get_hops();
+            let route_next_hop = RNH::new(
+                disco_packet_hdr.get_id(),
+                ip,
+                hops,
+                interface.ifidx,
+                eth_packet.get_source().into(),
+                disco_packet_hdr.get_mac().into(),
+            );
+            let route_next_hop_list = RouteNextHopList::new();
+            route_next_hop_list.add(route_next_hop);
+            let route = Route::new(
+                RouteOrigin::REMOTE,
+                route_next_hop_list,
+            );
+            let route_value = KeyValue::ROUTE { key: (ip, prefix_len), value: route };
+            state_client.add(route_value).await?;
+            */
+        }
 
     }
     Ok(())

@@ -12,12 +12,15 @@ pub struct DiscoHdr{
     #[construct_with(u8, u8, u8, u8, u8, u8)]
     pub mac: MacAddr,
     pub op: u8,
+    pub res_1: u8,
+    pub res_2: u8,
+    pub res_3: u8,
     #[payload]
     pub payload: Vec<u8>
 }
 
 impl DiscoHdr {
-    pub const LEN: usize = 17;
+    pub const LEN: usize = 20;
 }
 
 impl DiscoHdrPacket<'_>{
@@ -30,16 +33,22 @@ impl Display for DiscoHdrPacket<'_>{
         let id = self.get_id();
         let ip = std::net::Ipv4Addr::from(self.get_ip());
         let op = self.get_op();
-        let number_of_route_hdrs: usize = self.payload().len() / 9;
+        let len = self.get_len();
         let mut route_hdr_str = "".to_string();
-        for i in 0..number_of_route_hdrs{
+        for i in 0..len as usize{
             let offset = i * DiscoRouteHdr::LEN;
+            info!("OFFSET: {}", offset);
+            info!("PAYLOAD: {:?}", self.payload());
+            info!("PAYLOAD LEN: {}", self.payload().len());
+            info!("LEN: {}", len);
+            
             let pl = &self.payload()[offset..offset + DiscoRouteHdr::LEN];
             let disco_route_header: &[u8;DiscoRouteHdr::LEN] = &pl.try_into().unwrap();
             let route_hdr = DiscoRouteHdrPacket::new(disco_route_header).unwrap();
             route_hdr_str = format!("{}\n{}", route_hdr_str, route_hdr);
-        }         
-        write!(f, "id: {}, ip: {}, op: {}, rh:\n{}", id, ip, op, route_hdr_str)
+            
+        }
+        write!(f, "id: {}, ip: {}, op: {}, len:{},  rh:\n{}", id, ip, op, len, route_hdr_str)
     }
 }
 
@@ -47,17 +56,20 @@ impl Display for DiscoHdrPacket<'_>{
 pub struct DiscoRouteHdr{
     pub ip: u32be,
     pub hops: u32be,
-    pub prefix_len: u8,
+    pub prefix_len: u32be,
     #[payload]
     pub payload: Vec<u8>
 }
+
+#[derive(Clone)]
+pub struct Align(u8, u8, u8);
 
 impl Display for MutableDiscoHdrPacket<'_>{
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let id = self.get_id();
         let ip = std::net::Ipv4Addr::from(self.get_ip());
         let op = self.get_op();
-        let number_of_route_hdrs: usize = self.payload().len() / 9;
+        let number_of_route_hdrs: usize = self.get_len() as usize;
         let mut route_hdr_str = "".to_string();
         for i in 0..number_of_route_hdrs{
             let offset = i * DiscoRouteHdr::LEN;
@@ -72,7 +84,7 @@ impl Display for MutableDiscoHdrPacket<'_>{
 }
 
 impl DiscoRouteHdr{
-    pub const LEN: usize = 9;
+    pub const LEN: usize = 12;
 }
 
 impl DiscoRouteHdrPacket<'_>{

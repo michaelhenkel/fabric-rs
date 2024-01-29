@@ -45,7 +45,6 @@ impl State{
                 while let Some(cmd) = command_channel.recv().await{
                     match cmd{
                         StateCommand::List { tx , table_type} => {
-                            info!("state command list table_type: {}", table_type);
                             match table_type{
                                 TableType::ForwardingTable => {
                                     let ft_list = ft.list();

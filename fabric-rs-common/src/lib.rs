@@ -61,6 +61,9 @@ pub struct DiscoHdr{
     pub len: u16,
     pub mac: [u8;6],
     pub op: u8,
+    pub res_1: u8,
+    pub res_2: u8,
+    pub res_3: u8,
 }
 
 impl DiscoHdr{
@@ -71,7 +74,7 @@ impl DiscoHdr{
 pub struct DiscoRouteHdr{
     pub ip: u32,
     pub hops: u32,
-    pub prefix_len: u8,
+    pub prefix_len: u32,
 }
 
 impl DiscoRouteHdr{

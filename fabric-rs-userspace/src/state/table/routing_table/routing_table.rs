@@ -86,8 +86,20 @@ impl RouteTable
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Route{
-    origin: RouteOrigin,
-    next_hops: RouteNextHopList
+    pub origin: RouteOrigin,
+    pub next_hops: RouteNextHopList
+}
+
+impl Route{
+    pub fn new(origin: RouteOrigin, next_hops: RouteNextHopList) -> Self{
+        Route{
+            origin,
+            next_hops
+        }
+    }
+    pub fn get_next_hops(&self) -> &Vec<RouteNextHop>{
+        &self.next_hops.0
+    }
 }
 
 impl Display for Route{
@@ -97,7 +109,7 @@ impl Display for Route{
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum RouteOrigin{
+pub enum RouteOrigin{
     LOCAL,
     REMOTE,
 }
@@ -111,13 +123,13 @@ impl Display for RouteOrigin{
 }
 
 #[derive(Debug, Clone, PartialEq)]
-struct RouteNextHop{
-    originator_id: u32,
-    ip: u32,
-    hops: u32,
-    ifidx: u32,
-    src_mac: [u8;6],
-    dst_mac: [u8;6],
+pub struct RouteNextHop{
+    pub originator_id: u32,
+    pub ip: u32,
+    pub hops: u32,
+    pub ifidx: u32,
+    pub src_mac: [u8;6],
+    pub dst_mac: [u8;6],
 }
 impl Display for RouteNextHop{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -128,8 +140,30 @@ impl Display for RouteNextHop{
     }
 }
 
+impl RouteNextHop{
+    pub fn new(originator_id: u32, ip: u32, hops: u32, ifidx: u32, src_mac: [u8;6], dst_mac: [u8;6]) -> Self{
+        RouteNextHop{
+            originator_id,
+            ip,
+            hops,
+            ifidx,
+            src_mac,
+            dst_mac,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
-struct RouteNextHopList(Vec<RouteNextHop>);
+pub struct RouteNextHopList(Vec<RouteNextHop>);
+
+impl RouteNextHopList{
+    pub fn new() -> Self{
+        RouteNextHopList(Vec::new())
+    }
+    pub fn add(&mut self, nh: RouteNextHop){
+        self.0.push(nh);
+    }
+}
 
 impl Display for RouteNextHopList{
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
