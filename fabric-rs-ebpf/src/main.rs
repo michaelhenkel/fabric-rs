@@ -35,6 +35,10 @@ static mut XSKMAP: XskMap = XskMap::with_max_entries(8, 0);
 static mut INTERFACEQUEUETABLE: HashMap<InterfaceQueue, u32> =
     HashMap::<InterfaceQueue, u32>::with_max_entries(16, 0);
 
+#[map(name = "DUMMYTABLE")]
+static mut DUMMYTABLE: HashMap<u32, u32> =
+    HashMap::<u32, u32>::with_max_entries(1, 0);
+
 
 pub enum InstanceType {
     INSTANCE,
@@ -52,6 +56,14 @@ pub fn fabric_rs(ctx: XdpContext) -> u32 {
 fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
     let packet_size = ctx.data_end() - ctx.data();
     let ingress_if_idx = unsafe { (*ctx.ctx).ingress_ifindex };
+
+    match unsafe { DUMMYTABLE.get(&ingress_if_idx) } {
+        Some(_) => {
+            return Ok(xdp_action::XDP_PASS);
+        }
+        None => {}
+    }
+
     let queue_idx = unsafe { (*ctx.ctx).rx_queue_index };
     let interface_queue = InterfaceQueue::new(ingress_if_idx, queue_idx);
     let queue_idx = unsafe { INTERFACEQUEUETABLE.get(&interface_queue) };
@@ -74,12 +86,9 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
         }
     }
     if unsafe { (*eth_hdr).ether_type } == EtherType::Arp {
-        info!(&ctx, "arp packet received");
-
         let queue_idx = if let Some(queue_idx) = queue_idx{
             *queue_idx
         } else {
-            info!(&ctx, "queue_idx not found");
             return Ok(xdp_action::XDP_PASS);
         };
 
@@ -88,7 +97,6 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
                 return Ok(res)
             },
             Err(e) => {
-                info!(&ctx, "bpf_redirect returned error: {}", e);
                 return Ok(xdp_action::XDP_PASS);
             }
         }
@@ -104,8 +112,6 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
     let key = Key::new(32, u32::from_be(dst_ip));
 
     if let Some (route_next_hops) = unsafe { ROUTINGTABLE.get(&key)}{
-        info!(&ctx, "found route_next_hops for: {:i}", u32::from_be(dst_ip));
-
         let mut total_next_hops = 0;
         for nh in route_next_hops{
             total_next_hops = nh.total_next_hops;
@@ -130,25 +136,6 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
                     (*eth_hdr).dst_addr[4] = nh.src_mac[4];
                     (*eth_hdr).dst_addr[5] = nh.src_mac[5];
                 }
-                info!(
-                    &ctx,
-                    "\nsrc_mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}\ndst_mac: {:x}:{:x}:{:x}:{:x}:{:x}:{:x}\nifidx: {}\nsrc_ip: {:i}\ndst_ip: {:i}",
-                    unsafe { (*eth_hdr).src_addr[0] },
-                    unsafe { (*eth_hdr).src_addr[1] },
-                    unsafe { (*eth_hdr).src_addr[2] },
-                    unsafe { (*eth_hdr).src_addr[3] },
-                    unsafe { (*eth_hdr).src_addr[4] },
-                    unsafe { (*eth_hdr).src_addr[5] },
-                    unsafe { (*eth_hdr).dst_addr[0] },
-                    unsafe { (*eth_hdr).dst_addr[1] },
-                    unsafe { (*eth_hdr).dst_addr[2] },
-                    unsafe { (*eth_hdr).dst_addr[3] },
-                    unsafe { (*eth_hdr).dst_addr[4] },
-                    unsafe { (*eth_hdr).dst_addr[5] },
-                    nh.ifidx,
-                    u32::from_be(src_ip),
-                    u32::from_be(dst_ip)
-                );
                 let res = unsafe { bpf_redirect(nh.ifidx, 0)};
                 return Ok(res as u32)
             }

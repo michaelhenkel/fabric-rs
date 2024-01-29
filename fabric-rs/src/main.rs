@@ -31,6 +31,8 @@ struct Opt {
     log: Option<bool>,
     #[clap(short, long)]
     send: Option<bool>,
+    #[clap(short, long)]
+    dummy: Option<bool>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -128,33 +130,29 @@ async fn main() -> Result<(), anyhow::Error> {
         panic!("INTERFACEQUEUETABLE map not found");
     };
 
-    let mut jh_list = Vec::new();
-    let mut user_space = UserSpace::new(
-        interface_list,
-        config.id,
-        route_table,
-    );
-
-
-
-    let jh: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
-        user_space.run(xsk_map, interface_queue_table, opt.send).await
-    });
-    jh_list.push(jh);
-    
-
-    let log = opt.log.unwrap_or(false);
-
-    /*
-    if !log{
+    if !opt.dummy.unwrap_or(false){
+        let mut jh_list = Vec::new();
+        let mut user_space = UserSpace::new(
+            interface_list,
+            config.id,
+            route_table,
+        );
         let jh: tokio::task::JoinHandle<Result<(), anyhow::Error>> = tokio::spawn(async move {
-            cli(user_space_client).await
+            user_space.run(xsk_map, interface_queue_table, opt.send).await
         });
-        jh_list.push(jh);
+        jh_list.push(jh); 
+        futures::future::join_all(jh_list).await;
+    } else {
+        let mut dummy_table = if let Some(dummy_table) = bpf.take_map("DUMMYTABLE"){
+            let dummy_table: BpfHashMap<MapData,u32, u32> = BpfHashMap::try_from(dummy_table).unwrap();
+            dummy_table
+        } else {
+            panic!("DUMMYTABLE map not found");
+        };
+        for (idx, _ ) in &interface_list {
+            dummy_table.insert(idx, 1, 0).unwrap();
+        }
     }
-    */
-
-    futures::future::join_all(jh_list).await;
     info!("Waiting for Ctrl-C...");
     signal::ctrl_c().await?;
     info!("Exiting...");

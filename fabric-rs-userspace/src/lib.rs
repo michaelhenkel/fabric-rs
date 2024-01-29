@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::IpAddr, num, sync::{Arc, Mutex}};
+use std::{collections::HashMap, net::{IpAddr, Ipv4Addr}, num, sync::{Arc, Mutex}};
 use af_xdp::af_xdp::AfXdpClient;
 use aya::maps::{LpmTrie, MapData, XskMap, HashMap as BpfHashMap};
 use disco_rs::{DiscoHdr, DiscoHdrPacket, DiscoRouteHdr, DiscoRouteHdrPacket, MutableDiscoHdrPacket, MutableDiscoRouteHdrPacket};
@@ -6,7 +6,7 @@ use fabric_rs_common::{InterfaceQueue, RouteNextHop};
 use interface::interface::Interface;
 use log::{error, info};
 use network_types::eth::EthHdr;
-use pnet::{packet::{arp::ArpPacket, ethernet::{EtherType, EtherTypes, EthernetPacket, MutableEthernetPacket}, FromPacket}, util::MacAddr};
+use pnet::{packet::{arp::{ArpHardwareType, ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPacket}, ethernet::{EtherType, EtherTypes, EthernetPacket, MutableEthernetPacket}, FromPacket}, util::MacAddr};
 use send_receive::send_receive::{SendReceive, SendReceiveClient};
 use state::{
     state::{Key, KeyValue, State, StateClient, Value},
@@ -16,7 +16,6 @@ use state::{
 use cli::cli::Cli;
 use pnet::packet::Packet;
 use crate::af_xdp::af_xdp::AfXdp;
-use fabric_rs_common::DiscoHdr as DiscoHdr2;
 
 pub mod interface;
 pub mod send_receive;
@@ -36,7 +35,7 @@ impl UserSpace{
     pub fn new(
         interfaces: HashMap<u32,Interface>,
         id: u32,
-        lpm_trie: LpmTrie<MapData, u32, [RouteNextHop;32]>
+        lpm_trie: LpmTrie<MapData, u32, [RouteNextHop;32]>,
     ) -> Self{
         UserSpace{
             lpm_trie: Arc::new(Mutex::new(lpm_trie)),
@@ -80,7 +79,8 @@ impl UserSpace{
             true
         };
         if send{
-            let jh = self.disco_sender( af_xdp_client);
+            //let jh = self.disco_sender( af_xdp_client);
+            let jh = self.arp_sender( af_xdp_client);
             jh_list.push(jh.await?);
             info!("{} disco sender tasks running", jh_list.len());
         }
@@ -108,23 +108,19 @@ impl UserSpace{
                     } else {
                         continue;
                     };
+                    let interface = if let Some(interface) = interfaces.get(&ifidx){
+                        interface.clone()
+                    } else {
+                        continue;
+                    };
                     match eth_packet.get_ethertype(){
                         EtherTypes::Arp => {
-                            let arp_packet = if let Some(arp_packet) = ArpPacket::new(eth_packet.payload()){
-                                arp_packet
-                            } else {
-                                continue;
-                            };
-                            //if let Err(e) = arp_handler(arp_packet, ifidx, state_client.clone(), sr_client.clone()).await{
-                            //    error!("Error handling arp: {:?}", e);
-                            //}
+                            if let Err(e) = arp_handler(eth_packet, interface, state_client.clone(), af_xdp_client.clone(), id).await{
+                                error!("Error handling disco: {:?}", e);
+                            }
                         },
                         EtherType(0x0060) => {
-                            let interface = if let Some(interface) = interfaces.get(&ifidx){
-                                interface.clone()
-                            } else {
-                                continue;
-                            };
+
                             if let Err(e) = disco_handler(eth_packet, interface, state_client.clone(), af_xdp_client.clone(), id).await{
                                 error!("Error handling disco: {:?}", e);
                             }
@@ -159,6 +155,39 @@ impl UserSpace{
                     disco_packet.set_op(0);
                     disco_packet.set_len(0);
                     ethernet_packet.set_payload(disco_packet.packet());
+                    if let Err(e) = afxdp_client.send(interface.ifidx, ethernet_packet.packet().to_vec()).await{
+                        println!("Error sending disco: {:?}", e);
+                    }
+                }
+            }
+        });
+        Ok(jh)
+    }
+
+    pub async fn arp_sender(&self, mut afxdp_client: AfXdpClient) -> anyhow::Result<tokio::task::JoinHandle<()>>{
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+        let interfaces = self.interfaces.clone();
+        let jh = tokio::spawn(async move{
+            loop{
+                interval.tick().await;
+                for (_, interface) in interfaces.iter(){
+                    let mut ethernet_buffer = [0u8; EthHdr::LEN + ArpPacket::minimum_packet_size()];
+                    let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+                    ethernet_packet.set_destination(MacAddr::broadcast());
+                    ethernet_packet.set_source(interface.mac.into());
+                    ethernet_packet.set_ethertype(EtherTypes::Arp);
+                    let mut arp_buffer = [0u8; ArpPacket::minimum_packet_size()];
+                    let mut arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
+                    arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+                    arp_packet.set_protocol_type(EtherTypes::Ipv4);
+                    arp_packet.set_hw_addr_len(6);
+                    arp_packet.set_proto_addr_len(4);
+                    arp_packet.set_operation(ArpOperations::Request);
+                    arp_packet.set_sender_hw_addr(interface.mac.into());
+                    arp_packet.set_sender_proto_addr(interface.ip.into());
+                    arp_packet.set_target_hw_addr(MacAddr::broadcast());
+                    arp_packet.set_target_proto_addr(Ipv4Addr::new(0,0,0,0));
+                    ethernet_packet.set_payload(arp_packet.packet());
                     if let Err(e) = afxdp_client.send(interface.ifidx, ethernet_packet.packet().to_vec()).await{
                         println!("Error sending disco: {:?}", e);
                     }
@@ -237,7 +266,7 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
                     let local = match route.origin{
                         RouteOrigin::LOCAL => {
                             if *ip != interface.ip.into(){
-                                continue
+                                //continue
                             }
                             true
                         },
@@ -280,6 +309,7 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
             disco_packet.set_ip(interface.ip.into());
             disco_packet.set_op(1);
             disco_packet.set_len(route_count);
+
             let mut disco_packet = disco_packet.packet().to_vec();
             disco_packet.extend(routes.clone());
             let mut ethernet_packet_buffer = [0u8; EthHdr::LEN];
@@ -303,10 +333,6 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
             } else {
                 continue;
             };
-            
-            info!("Disco route header: {}", disco_route_packet);
-            
-            
             let ip = disco_route_packet.get_ip();
             let prefix_len = disco_route_packet.get_prefix_len();
             let hops = disco_route_packet.get_hops();
@@ -315,8 +341,8 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
                 disco_packet_hdr.get_ip(),
                 hops,
                 interface.ifidx,
+                eth_packet.get_destination().into(),
                 eth_packet.get_source().into(),
-                disco_packet_hdr.get_mac().into(),
             );
             route_list.insert((ip, prefix_len), route_next_hop);
         }
@@ -366,14 +392,113 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
                 );
                 route
             };
-            let route_value = KeyValue::ROUTE { key: (*ip, *prefix_len as u8), value: new_route };
+            let route_value = KeyValue::ROUTE { key: (*ip, *prefix_len as u8), value: new_route.clone() };
             state_client.add(route_value).await?;
+
+            let total_next_hops = new_route.get_next_hops().len() as u32;
+
+            let mut rnh_list: [RouteNextHop; 32] = [RouteNextHop::default(); 32];
+
+            for (idx, nh) in new_route.get_next_hops().iter().enumerate(){
+                let rnh = RouteNextHop{
+                    ip: nh.ip,
+                    ifidx: nh.ifidx,
+                    dst_mac: nh.dst_mac,
+                    src_mac: nh.src_mac,
+                    total_next_hops,
+                };
+                rnh_list[idx] = rnh;
+            }
+            let forwarding_value = KeyValue::FORWARDING { key: (*ip, *prefix_len), value: (rnh_list) };
+            state_client.add(forwarding_value).await?;
         }
     }
     Ok(())
 }
 
-pub async fn arp_handler(arp_packet: ArpPacket<'_>, ifidx: u32, state_client: StateClient, sr_client: SendReceiveClient) -> anyhow::Result<()>{
+pub async fn arp_handler(eth_packet: EthernetPacket<'_>, interface: Interface, state_client: StateClient, mut af_xdp_client: AfXdpClient, id: u32) -> anyhow::Result<()>{
+    let arp_packet = if let Some(arp_packet) = ArpPacket::new(eth_packet.payload().as_ref()){
+        arp_packet
+    } else {
+        return Err(anyhow::anyhow!("Error parsing disco packet"));
+    };
+    match arp_packet.get_operation(){
+        ArpOperations::Reply => {},
+        ArpOperations::Request => {
+            if arp_packet.get_target_proto_addr() == Ipv4Addr::new(0, 0, 0, 0){
+                let mut ethernet_buffer = [0u8; EthHdr::LEN + 24];
+                let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+                ethernet_packet.set_destination(MacAddr::broadcast());
+                ethernet_packet.set_source(interface.mac.into());
+                ethernet_packet.set_ethertype(EtherType(0x0060));
+                let mut disco_buffer = [0u8; 24];
+                let mut disco_packet = MutableDiscoHdrPacket::new(&mut disco_buffer).unwrap();
+                disco_packet.set_id(id);
+                disco_packet.set_ip(u32::from_be_bytes(interface.ip.octets()));
+                disco_packet.set_op(0);
+                disco_packet.set_len(0);
+                ethernet_packet.set_payload(disco_packet.packet());
+                if let Err(e) = af_xdp_client.send(interface.ifidx, ethernet_packet.packet().to_vec()).await{
+                    println!("Error sending disco: {:?}", e);
+                }
+            } else {
+                let mut arp_buffer = [0u8; ArpPacket::minimum_packet_size()];
+                let mut new_arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
+                new_arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
+                new_arp_packet.set_protocol_type(EtherTypes::Ipv4);
+                new_arp_packet.set_hw_addr_len(6);
+                new_arp_packet.set_proto_addr_len(4);
+                new_arp_packet.set_operation(ArpOperations::Reply);
+                new_arp_packet.set_sender_hw_addr(interface.mac.into());
+                new_arp_packet.set_sender_proto_addr(arp_packet.get_target_proto_addr());
+                new_arp_packet.set_target_hw_addr(arp_packet.get_sender_hw_addr());
+                new_arp_packet.set_target_proto_addr(arp_packet.get_sender_proto_addr());
+                let mut ethernet_buffer = [0u8; EthHdr::LEN + ArpPacket::minimum_packet_size()];
+                let mut ethernet_packet = MutableEthernetPacket::new(&mut ethernet_buffer).unwrap();
+                ethernet_packet.set_destination(eth_packet.get_source());
+                ethernet_packet.set_source(interface.mac.into());
+                ethernet_packet.set_ethertype(EtherTypes::Arp);
+                ethernet_packet.set_payload(new_arp_packet.packet());
+                if let Err(e) = af_xdp_client.send(interface.ifidx, ethernet_packet.packet().to_vec()).await{
+                    println!("Error sending disco: {:?}", e);
+                }
+                let mut route_next_hop_list = RouteNextHopList::new();
+                let route_next_hop = RNH::new(
+                    id,
+                    arp_packet.get_sender_proto_addr().into(),
+                    1,
+                    interface.ifidx,
+                    eth_packet.get_source().into(),
+                    interface.mac.into(),
+                );
+                route_next_hop_list.add(route_next_hop);
+                let route = Route::new(
+                    RouteOrigin::LOCAL,
+                    route_next_hop_list,
+                );
+                let route_value = KeyValue::ROUTE { key: (arp_packet.get_sender_proto_addr().into(), 32), value: route.clone() };
+                state_client.add(route_value).await?;
+
+                let total_next_hops = route.get_next_hops().len() as u32;
+
+                let mut rnh_list: [RouteNextHop; 32] = [RouteNextHop::default(); 32];
+    
+                for (idx, nh) in route.get_next_hops().iter().enumerate(){
+                    let rnh = RouteNextHop{
+                        ip: nh.ip,
+                        ifidx: nh.ifidx,
+                        dst_mac: nh.dst_mac,
+                        src_mac: nh.src_mac,
+                        total_next_hops: total_next_hops,
+                    };
+                    rnh_list[idx] = rnh;
+                }
+                let forwarding_value = KeyValue::FORWARDING { key: (arp_packet.get_sender_proto_addr().into(), 32), value: (rnh_list) };
+                state_client.add(forwarding_value).await?;
+            }
+        },
+        _ => {},
+    }
     Ok(())
 }
 

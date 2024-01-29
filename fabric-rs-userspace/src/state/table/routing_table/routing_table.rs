@@ -104,6 +104,10 @@ impl Route{
     pub fn get_next_hops_mut(&mut self) -> &mut Vec<RouteNextHop>{
         &mut self.next_hops.0
     }
+
+    pub fn len(&self) -> usize{
+        self.next_hops.0.len()
+    }
 }
 
 impl Display for Route{

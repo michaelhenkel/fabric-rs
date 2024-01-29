@@ -262,13 +262,16 @@ impl Display for KeyValue{
             KeyValue::ROUTE{key, value} => {
                 let prefix = key.0;
                 let prefix_len = key.1;
-                write!(f, "{}/{} -> \n{}", prefix, prefix_len, value)
+                write!(f, "{}/{} -> \n{}", Ipv4Addr::from(prefix), prefix_len, value)
             },
             KeyValue::FORWARDING{key, value} => {
-                let prefix = key.0;
+                let prefix = Ipv4Addr::from(key.0);
                 let prefix_len = key.1;
                 let mut s = String::new();
                 for rnh in value{
+                    if rnh.ip == 0{
+                        continue;
+                    }
                     s.push_str(
                         &format!("\t\tip {}\n\t\tifidx {}\n\t\tsrc_mac {}\n\t\tdst_mac {}\n\t\ttotal_hops {}", 
                         Ipv4Addr::from(rnh.ip),
