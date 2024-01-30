@@ -66,16 +66,20 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
 
     let queue_idx = unsafe { (*ctx.ctx).rx_queue_index };
     let interface_queue = InterfaceQueue::new(ingress_if_idx, queue_idx);
-    let queue_idx = unsafe { INTERFACEQUEUETABLE.get(&interface_queue) };
+    let queue_idx = if let Some(queue_idx) = unsafe { INTERFACEQUEUETABLE.get(&interface_queue) }{
+        *queue_idx
+    } else {
+        info!(
+            &ctx,
+            "no queue_idx found for interface/queue: {}/{}",
+            ingress_if_idx, queue_idx
+        );
+        return Ok(xdp_action::XDP_ABORTED);
+    };
+
     let eth_hdr = ptr_at_mut::<EthHdr>(&ctx, 0).ok_or(xdp_action::XDP_ABORTED)?;
     
     if unsafe { (*eth_hdr).ether_type } == EtherType::Loop {
-        let queue_idx = if let Some(queue_idx) = queue_idx{
-            *queue_idx
-        } else {
-            return Ok(xdp_action::XDP_PASS);
-        };
-
         match unsafe{ XSKMAP.redirect(queue_idx, 0) }{
             Ok(res) => {
                 return Ok(res)
@@ -86,17 +90,15 @@ fn try_fabric_rs(ctx: XdpContext) -> Result<u32, u32> {
         }
     }
     if unsafe { (*eth_hdr).ether_type } == EtherType::Arp {
-        let queue_idx = if let Some(queue_idx) = queue_idx{
-            *queue_idx
-        } else {
-            return Ok(xdp_action::XDP_PASS);
-        };
-
         match unsafe{ XSKMAP.redirect(queue_idx, 0) }{
             Ok(res) => {
                 return Ok(res)
             },
             Err(e) => {
+                info!(
+                    &ctx,
+                    "arp packet redirect failed"
+                );
                 return Ok(xdp_action::XDP_PASS);
             }
         }

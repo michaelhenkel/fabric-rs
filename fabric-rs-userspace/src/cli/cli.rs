@@ -28,8 +28,6 @@ impl Cli{
     pub async fn run(&self, state_client: StateClient) -> anyhow::Result<Vec<JoinHandle<()>>>{
         info!("Starting Cli");
         let mut jh_list = Vec::new();
-        
-        
         let rx = self.rx.clone();
         let jh = tokio::spawn(async move{
             let mut rx = rx.write().await;
@@ -66,7 +64,6 @@ impl Cli{
                 //.with_validator(length!(10))
                 .prompt()
                 .unwrap();
-        
                 match command.as_str() {
                     "RouteTable" => {
                         cli_client.list(TableType::RouteTable).await.unwrap().iter().for_each(|kv| println!("{}", kv));

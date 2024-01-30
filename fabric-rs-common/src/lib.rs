@@ -38,7 +38,7 @@ pub struct RouteNextHop {
 unsafe impl aya::Pod for RouteNextHop {}
 
 #[repr(C)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct InterfaceQueue {
     pub ifidx: u32,
     pub queue: u32,

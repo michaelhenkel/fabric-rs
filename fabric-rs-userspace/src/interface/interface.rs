@@ -1,4 +1,5 @@
-use std::{ffi::CString, io::{Error,ErrorKind}, net::Ipv4Addr};
+use std::{ffi::CString, io::{Error,ErrorKind}, net::Ipv4Addr, path::Path};
+use aya::maps::queue;
 use futures::TryStreamExt;
 use log::error;
 use netlink_packet_route::link::LinkAttribute;
@@ -11,6 +12,7 @@ pub struct Interface{
     pub ifidx: u32,
     pub ip: Ipv4Addr,
     pub mac: [u8;6],
+    pub queues: u32,
 }
 
 impl Interface{
@@ -36,13 +38,46 @@ impl Interface{
                 return Err(anyhow::anyhow!("failed to get local mac: {:?}", e));
             }
         };
+        let queues = match get_queues(name.clone()){
+            Ok(queues) => queues,
+            Err(e) => {
+                return Err(anyhow::anyhow!("failed to get queues: {:?}", e));
+            }
+        };
         Ok(Self{
             name,
             ifidx,
             ip,
             mac,
+            queues
         })
     }
+}
+
+fn get_queues(intf: String) -> anyhow::Result<u32> {
+    let p = format!("/sys/class/net/{}/queues/", intf);
+    let path = Path::new(&p);
+    let entries = match path.read_dir() {
+        Ok(entries) => entries,
+        Err(err) => panic!("Error reading the directory: {:?}", err),
+    };
+    // the directory should contain multiple rx- and tx- entries. They are indexed like rx-0, rx-1, ... Count the number of rx- and tx- entries
+    let mut rx_count = 0;
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(err) => panic!("Error reading entry: {:?}", err),
+        };
+        let file_name = entry.file_name();
+        let file_name = match file_name.to_str() {
+            Some(file_name) => file_name,
+            None => panic!("Error converting file name to string"),
+        };
+        if file_name.starts_with("rx-") {
+            rx_count += 1;
+        }
+    }
+    Ok(rx_count)
 }
 
 async fn get_local_mac(index: u32) -> anyhow::Result<Option<[u8;6]>> {

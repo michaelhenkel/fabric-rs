@@ -1,4 +1,4 @@
-use std::{collections::HashMap, net::{IpAddr, Ipv4Addr}, num, sync::{Arc, Mutex}};
+use std::{collections::HashMap, net::Ipv4Addr, sync::{Arc, Mutex}};
 use af_xdp::af_xdp::AfXdpClient;
 use aya::maps::{LpmTrie, MapData, XskMap, HashMap as BpfHashMap};
 use disco_rs::{DiscoHdr, DiscoHdrPacket, DiscoRouteHdr, DiscoRouteHdrPacket, MutableDiscoHdrPacket, MutableDiscoRouteHdrPacket};
@@ -6,8 +6,7 @@ use fabric_rs_common::{InterfaceQueue, RouteNextHop};
 use interface::interface::Interface;
 use log::{error, info};
 use network_types::eth::EthHdr;
-use pnet::{packet::{arp::{ArpHardwareType, ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPacket}, ethernet::{EtherType, EtherTypes, EthernetPacket, MutableEthernetPacket}, FromPacket}, util::MacAddr};
-use send_receive::send_receive::{SendReceive, SendReceiveClient};
+use pnet::{packet::{arp::{ArpHardwareTypes, ArpOperations, ArpPacket, MutableArpPacket}, ethernet::{EtherType, EtherTypes, EthernetPacket, MutableEthernetPacket}}, util::MacAddr};
 use state::{
     state::{Key, KeyValue, State, StateClient, Value},
         table::{neighbor_table::neighbor_table::{Neighbor, NeighborInterface},
@@ -18,7 +17,6 @@ use pnet::packet::Packet;
 use crate::af_xdp::af_xdp::AfXdp;
 
 pub mod interface;
-pub mod send_receive;
 pub mod state;
 pub mod cli;
 pub mod af_xdp;
@@ -27,7 +25,6 @@ pub struct UserSpace{
     lpm_trie: Arc<Mutex<LpmTrie<MapData, u32, [RouteNextHop;32]>>>,
     interfaces: HashMap<u32,Interface>,
     id: u32,
-    sr_client: Option<SendReceiveClient>,
     state_client: Option<StateClient>,
 }
 
@@ -41,7 +38,6 @@ impl UserSpace{
             lpm_trie: Arc::new(Mutex::new(lpm_trie)),
             interfaces,
             id,
-            sr_client: None,
             state_client: None,
         }
     }
@@ -89,7 +85,7 @@ impl UserSpace{
         let jh = cli.run(state_client);
         jh_list.extend(jh.await?);
         info!("{} cli tasks running", jh_list.len());
-
+        
         info!("running {} tasks", jh_list.len());
 
         futures::future::join_all(jh_list).await;
@@ -262,27 +258,15 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
         for local_route in &local_routes{
             let new_disco_route_packet_hdr = match local_route{
                 KeyValue::ROUTE { key: (ip,prefix_len), value: route } => {
-                 
-                    let local = match route.origin{
-                        RouteOrigin::LOCAL => {
-                            if *ip != interface.ip.into(){
-                                //continue
-                            }
-                            true
-                        },
-                        RouteOrigin::REMOTE => {
-                            false
-                        },
-                    };
                     let mut from_neighbor = false;
                     let mut hops = 1;
                     for rnh in route.get_next_hops(){
                         if disco_packet_hdr.get_id() == rnh.originator_id{
                             from_neighbor = true;
                         }
-                        if !local{
-                            hops = rnh.hops + 1;
-                        }    
+                        
+                        hops = rnh.hops + 1;
+                            
                     }
                     if !from_neighbor{
                         let mut disco_route_hdr_buffer = [0u8; DiscoRouteHdr::LEN];
@@ -361,7 +345,21 @@ pub async fn disco_handler(eth_packet: EthernetPacket<'_>, interface: Interface,
             } else {
                 None
             };
+
+
+
             let new_route = if let Some(mut route) = route {
+
+                let mut exists = false;
+                for route_nh in route.get_next_hops(){
+                    if route_nh == rnh{
+                        exists = true;
+                    }
+                }
+                if exists{
+                    continue;
+                }
+
                 let mut remove_list = Vec::new();
                 let mut add_list = Vec::new();
                 for route_rnh in route.get_next_hops_mut(){
@@ -442,6 +440,7 @@ pub async fn arp_handler(eth_packet: EthernetPacket<'_>, interface: Interface, s
                     println!("Error sending disco: {:?}", e);
                 }
             } else {
+
                 let mut arp_buffer = [0u8; ArpPacket::minimum_packet_size()];
                 let mut new_arp_packet = MutableArpPacket::new(&mut arp_buffer).unwrap();
                 new_arp_packet.set_hardware_type(ArpHardwareTypes::Ethernet);
@@ -473,7 +472,7 @@ pub async fn arp_handler(eth_packet: EthernetPacket<'_>, interface: Interface, s
                 );
                 route_next_hop_list.add(route_next_hop);
                 let route = Route::new(
-                    RouteOrigin::LOCAL,
+                    RouteOrigin::REMOTE,
                     route_next_hop_list,
                 );
                 let route_value = KeyValue::ROUTE { key: (arp_packet.get_sender_proto_addr().into(), 32), value: route.clone() };
