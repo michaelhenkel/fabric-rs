@@ -1,17 +1,13 @@
 use core::{mem::MaybeUninit, num::NonZeroU32, ptr::NonNull};
-use std::{collections::HashMap, error::Error, sync::{atomic::{AtomicU32, Ordering}, Arc, Mutex}, time::Duration};
+use std::{collections::HashMap, sync::{Arc, Mutex}, time::Duration};
 use anyhow::anyhow;
-use disco_rs::DiscoHdrPacket;
 use fabric_rs_common::InterfaceQueue;
-use pnet::packet::{ethernet::EthernetPacket, Packet};
 use tokio::sync::RwLock;
-use xdpilone::{xdp::XdpDesc, DeviceQueue, RingRx, RingTx};
+use xdpilone::xdp::XdpDesc;
 use aya::maps::{MapData, XskMap, HashMap as BpfHashMap};
 use xdpilone::{BufIdx, IfInfo, Socket, SocketConfig, Umem, UmemConfig};
 use log::info;
 use crate::interface::interface::Interface;
-
-
 
 #[repr(align(4096))]
 struct PacketMap(MaybeUninit<[u8; 1 << 20]>);
@@ -208,7 +204,6 @@ pub async fn interface_runner(
     let jh = tokio::task::spawn_blocking(move ||{
         loop{
             let mut receive = ring_rx.receive(frame_number);
-            let mut frame_idx = 0;
             while let Some(desc) = receive.read(){
                 let buf = &recv_buf.as_ref()[desc.addr as usize..(desc.addr as usize + desc.len as usize)];
                 let data = buf.to_vec();
@@ -222,7 +217,6 @@ pub async fn interface_runner(
                 if let Err(e) = recv_tx.blocking_send((interface.ifidx, data)){
                     info!("Failed to send packet to client: {}", e);
                 }
-                frame_idx += 1;
             } 
         }
     });
@@ -248,9 +242,4 @@ fn ifinfo(ifname: &str, queue_id: Option<u32>) -> Result<IfInfo, anyhow::Error> 
     }
 
     Ok(info)
-}
-
-enum DeviceCommand{
-    FILL(XdpDesc),
-    COMPLETE,
 }

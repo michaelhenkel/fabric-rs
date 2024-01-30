@@ -1,6 +1,5 @@
 use std::{mem, fmt::{self, Display}};
 use pnet_macros::Packet;
-use log::info;
 use pnet_macros_support::{types::{u16be, u32be}, packet::Packet};
 use pnet_base::MacAddr;
 
